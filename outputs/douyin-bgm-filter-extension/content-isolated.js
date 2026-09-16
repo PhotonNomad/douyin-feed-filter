@@ -51,9 +51,16 @@
   const DEBUG_LOG_KEY = "debugLog";
   const DEBUG_LOG_LIMIT = 300;
   const DEBUG_TEXT_LIMIT = 400;
-  // 抖音 PC 网页版操作栏图标中心，大约在视频右边缘往左 37~41px（实测三种窗口宽度），
-  // 取中值 39px，误差不超过 ±2px。要用到视频/播放器容器的右边缘，所以不依赖点赞图标。
-  const RAIL_CENTER_INSET = 39;
+  // 抖音 PC 网页版操作栏的结构（从它自己的样式反推）：
+  //   .immersive-player-switch { padding-right: 12px（窄屏 16px）;
+  //                              transform-origin: right bottom; transform: scale(s); }
+  //   └ 50px 宽的图标列，点赞等图标在列里水平居中
+  // 所以图标中心 = 容器右边缘 − (padding-right + 50 / 2) × s。
+  // 因为 transform-origin 在右下角，缩放只会把图标中心往左推，右边缘不变。
+  const RAIL_COLUMN_WIDTH = 50;
+  const RAIL_SELECTOR = '[class*="immersive-player-switch"]';
+  // 万一找不到操作栏容器时的兜底值（窄屏 16px 内边距 → 41；常规 12px → 37）
+  const RAIL_CENTER_INSET_FALLBACK = 37;
 
   let debugEvents = [];
   let debugPersistTimer = null;
@@ -1526,9 +1533,8 @@ function updateToolbarPosition() {
   toolbar.style.height = "";
   toolbar.style.margin = "";
 
-  // X 轴直接用几何算：抖音操作栏的图标中心固定落在视频右边缘往左 40px 处，
-  // 不去查询点赞图标本身——它比按钮晚一帧渲染，查它就会「先出现在右边再挪一下」。
-  const anchorCenterX = targetRect.right - RAIL_CENTER_INSET;
+  // X 轴按抖音自己的布局规则算，不查询点赞图标本身。
+  const anchorCenterX = computeRailCenterX(activeContainer, targetRect);
   toolbar.style.left = `${Math.max(8, anchorCenterX - buttonSize / 2)}px`;
   toolbar.style.right = "auto";
   toolbar.style.display = "block";
@@ -1545,6 +1551,42 @@ function updateToolbarPosition() {
 function scheduleToolbarPosition() {
     clearTimeout(toolbarPositionTimer);
     toolbarPositionTimer = setTimeout(updateToolbarPosition, 150);
+  }
+
+  // 按抖音操作栏容器自己的盒模型算出图标中心 X：
+  //   容器右边缘 −（内边距 + 列宽/2）× 缩放
+  // 这样换窗口大小、换视频都一致，也不需要去看点赞图标在哪。
+  function computeRailCenterX(container, targetRect) {
+    const fallback = targetRect.right - RAIL_CENTER_INSET_FALLBACK;
+
+    try {
+      const rails = container?.querySelectorAll?.(RAIL_SELECTOR);
+      if (!rails?.length) return fallback;
+
+      // 预加载的下一个视频也可能有同样的容器，取和当前视频重叠最多的那个。
+      let rail = null;
+      let bestOverlap = -1;
+      for (const candidate of rails) {
+        const rect = candidate.getBoundingClientRect();
+        if (!rect.width) continue;
+        const overlap =
+          Math.min(rect.bottom, targetRect.bottom) - Math.max(rect.top, targetRect.top);
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          rail = { element: candidate, rect };
+        }
+      }
+      if (!rail) return fallback;
+
+      const style = getComputedStyle(rail.element);
+      const paddingRight = parseFloat(style.paddingRight) || 0;
+      const matrix = /matrix\(([-\d.]+)/.exec(style.transform || "");
+      const scale = matrix ? Number(matrix[1]) || 1 : 1;
+
+      return rail.rect.right - (paddingRight + RAIL_COLUMN_WIDTH / 2) * scale;
+    } catch (_) {
+      return fallback;
+    }
   }
 
   // 只做诊断：我们不再用点赞图标定位，但如果算出来的 X 和真实图标中心差得多，
@@ -1566,7 +1608,7 @@ function scheduleToolbarPosition() {
       logEvent("info", "按几何算出的按钮 X 与点赞图标中心有偏差", {
         drift,
         videoRight: Math.round(targetRect.right),
-        inset: RAIL_CENTER_INSET
+        anchorCenterX: Math.round(anchorCenterX)
       });
     } catch (_) {}
   }

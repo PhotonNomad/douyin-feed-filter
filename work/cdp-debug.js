@@ -332,6 +332,115 @@ const PROBES = {
   // 看弹窗页里作者 / 标签 / 音乐这些信息在 DOM 上的真实结构，供兜底识别使用。
   // 屏蔽按钮「出现时先偏右、再挪一下」的量化：看它第一次可见时的位置准不准。
   // 找「哪个祖先元素的右边缘到点赞图标中心的距离是固定值」，用它当几何基准。
+  // 读抖音自己的计算样式，反推操作栏的定位公式（不管窗口多大都成立的那种）。
+  // 直接读样式表规则 + 内联样式，找到 padding / scale 到底是谁设的。
+  css: `(() => {
+    const digg = document.querySelector('[data-e2e="video-player-digg"]');
+    if (!digg) return { error: "页面上没有点赞图标" };
+
+    const inlineStyles = [];
+    let el = digg;
+    for (let i = 0; i < 6 && el; i += 1, el = el.parentElement) {
+      inlineStyles.push({
+        level: i,
+        tag: el.tagName,
+        cls: String(el.className || "").slice(0, 60),
+        inline: el.getAttribute("style") || "",
+        cssVars: ["--rail-right-padding", "--player-scale", "--scale"]
+          .map((name) => name + "=" + (el.style.getPropertyValue(name) || "无"))
+          .join(", ")
+      });
+    }
+
+    const matched = [];
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (_) {
+        matched.push({ href: sheet.href, error: "跨域样式表不可读" });
+        continue;
+      }
+      const walk = (list, media) => {
+        for (const rule of list) {
+          if (rule.cssRules && rule.selectorText === undefined) {
+            const nextMedia = rule.conditionText
+              ? (media ? media + " and " + rule.conditionText : rule.conditionText)
+              : media;
+            walk(rule.cssRules, nextMedia);
+            continue;
+          }
+          const selector = rule.selectorText || "";
+          if (/immersive-player-switch|basePlayerContainer|slider-video|playerContainer/.test(selector)) {
+            matched.push({
+              href: sheet.href,
+              media: media || "",
+              selector: selector.slice(0, 160),
+              css: rule.style.cssText.slice(0, 400)
+            });
+          }
+        }
+      };
+      walk(rules, "");
+    }
+
+    return {
+      windowInnerWidth: window.innerWidth,
+      windowInnerHeight: window.innerHeight,
+      inlineStyles,
+      matched: matched.slice(0, 50)
+    };
+  })()`,
+
+  computed: `(() => {
+    const digg = document.querySelector('[data-e2e="video-player-digg"]');
+    if (!digg) return { error: "页面上没有点赞图标" };
+    const fmt = (rect) => rect
+      ? { x: +rect.x.toFixed(2), right: +rect.right.toFixed(2), w: +rect.width.toFixed(2), h: +rect.height.toFixed(2) }
+      : null;
+    const dr = digg.getBoundingClientRect();
+    const center = dr.x + dr.width / 2;
+    const chain = [];
+    let el = digg;
+    for (let i = 0; i < 9 && el; i += 1, el = el.parentElement) {
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const matrix = cs.transform && cs.transform !== "none" ? cs.transform : "";
+      const scaleMatch = /matrix\\(([-\\d.]+)/.exec(matrix);
+      chain.push({
+        level: i,
+        tag: el.tagName,
+        dataE2e: el.getAttribute("data-e2e") || "",
+        cls: String(el.className || "").slice(0, 40),
+        rect: fmt(r),
+        rightMinusCenter: +(r.right - center).toFixed(2),
+        position: cs.position,
+        display: cs.display,
+        right: cs.right,
+        left: cs.left,
+        width: cs.width,
+        paddingRight: cs.paddingRight,
+        paddingLeft: cs.paddingLeft,
+        marginRight: cs.marginRight,
+        transform: cs.transform,
+        scale: scaleMatch ? Number(scaleMatch[1]) : 1,
+        flexDirection: cs.flexDirection,
+        alignItems: cs.alignItems
+      });
+    }
+    const video = document.querySelector("video");
+    return {
+      windowInnerWidth: window.innerWidth,
+      windowInnerHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      diggRect: fmt(dr),
+      diggCenter: +center.toFixed(2),
+      videoRect: video ? fmt(video.getBoundingClientRect()) : null,
+      playerContainer: chain.find((item) => /basePlayerContainer/.test(item.cls))?.rect || null,
+      chain
+    };
+  })()`,
+
   anchor: `(() => {
     const digg = document.querySelector('[data-e2e="video-player-digg"]');
     if (!digg) return { error: "页面上没有点赞图标" };

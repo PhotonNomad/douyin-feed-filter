@@ -11,7 +11,7 @@
 项目：Chrome MV3 扩展「抖音视频屏蔽」，在抖音网页版推荐流的数据层按 BGM / 博主 / 标签过滤视频。
 仓库：C:\Users\issues\Documents\Codex\2026-09-06\wo
 源码：outputs\douyin-bgm-filter-extension（Chrome 直接加载这个目录，不要移动）
-当前版本：0.5.24（manifest.json）
+当前版本：0.5.25（manifest.json）
 背景文档：docs/handoff.md、CHANGELOG.md、README.md
 
 架构：
@@ -159,6 +159,7 @@ PC 网页版抖音的推荐流过滤扩展：用抖音接口返回的官方字�
 | 0.5.22 | 修复「第二个视频之后识别不到」：XHR 路径原来只处理推荐流地址，详情类接口的响应被跳过；现在也会读取（只读不改）并收窄到可能含视频数据的接口，同时给诊断日志降噪 |
 | 0.5.23 | 修复屏蔽按钮「先偏右再挪一下」：位置改用设置里的尺寸计算（原来量可能还没布局的按钮，会退回 40 默认值），并且位置没算准前先不显示，等点赞图标出现再显示 |
 | 0.5.24 | 按钮 X 轴改成**纯几何计算**（视频右边缘往左 39px = 操作栏图标中心），不再查询点赞图标；实测三种窗口宽度下真实内距为 37/41/40px，故取中值，最大偏差 ±2px。另加一条只写日志的偏差诊断 |
+| 0.5.25 | 按钮 X 轴改成**按抖音自己的布局规则算**：`图标中心 = 操作栏容器右边缘 − (padding-right + 50/2) × scale`。规则来自 `.immersive-player-switch` 的内联 `transform-origin: right bottom; transform: scale(s)` + `padding-right`；三种窗口宽度实测偏差均为 0px |
 
 详细条目见 `CHANGELOG.md`。
 
@@ -241,6 +242,23 @@ node work/cdp-debug.js --chrome="C:\Program Files (x86)\Microsoft\Edge\Applicati
 - 未登录的临时配置打开 `https://www.douyin.com/?recommend=1` 会被重定向到 `/jingxuan`，并出现登录弹窗。所以推荐流的日常路径要靠用户真机验证，自动环境主要用于精选页 / 详情页。
 - **直接复用旧配置目录会让 Edge 拒绝加载未打包扩展**（日志：`Extension error: 无法安装该应用或扩展`）。要么每次用全新临时配置，要么用 `--seedProfile=<已登录配置>`：只拷 `Local State` + `Default/Network/Cookies`，既保住登录态、又让扩展能正常加载。
 - 精选页切换视频要用真实输入（`--walk=N` 会点抖音自己的 `video-switch-next-arrow`）；脚本里合成的 `KeyboardEvent` / `WheelEvent` 会被抖音忽略，切不动。
+
+### 抖音操作栏（点赞那一列）的布局规则（已反推，按钮定位依赖它）
+
+```text
+<div class="... immersive-player-switch-on-hover" style="transform-origin: right bottom; transform: scale(s)">
+  <div style="width: 50px">        ← 图标列，点赞/评论/收藏/分享都在里面水平居中
+     <div data-e2e="video-player-digg">…</div>
+  </div>
+</div>
+```
+
+- `padding-right` 为 12px，窄屏（约 700px 高的视口）是 16px。
+- `transform-origin: right bottom` + `scale(s)`：缩放原点在右下角，所以容器右边缘不动，图标中心被往左推。
+- 因此 **图标中心 X = 容器右边缘 − (padding-right + 50/2) × s**。三种窗口实测：
+  `(25+12)×1 = 37`、`(25+16)×1 = 41`、`(25+12)×1.07882 = 39.92`，与真实位置完全一致。
+- 扩展据此定位按钮（`computeRailCenterX()`），不再查询点赞图标，也就不受它何时渲染的影响。
+- 抖音的样式表是跨域的，`document.styleSheets[i].cssRules` 读不到，只能靠元素的计算样式 + 内联样式反推；探针 `--probe=computed` / `--probe=css` 就是干这个的。
 
 - 重新加载扩展：`chrome://extensions/` → 该扩展 → 刷新按钮。
 - 重新加载扩展后必须**完全刷新**抖音页面，否则旧 content script 会报存储上下文失效。
