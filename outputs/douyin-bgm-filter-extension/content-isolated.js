@@ -51,6 +51,8 @@
   const DEBUG_LOG_KEY = "debugLog";
   const DEBUG_LOG_LIMIT = 300;
   const DEBUG_TEXT_LIMIT = 400;
+  // 等点赞图标出现最多重试几次（每次 120ms），超了才退回右上角。
+  const MAX_TOOLBAR_ANCHOR_MISSES = 8;
 
   let debugEvents = [];
   let debugPersistTimer = null;
@@ -191,6 +193,9 @@
   let toolbar = null;
   let toolbarButton = null;
   let toolbarPanel = null;
+  // 位置还没算准时先不显示按钮，避免「先出现在右边、再跳到点赞位置」。
+  let toolbarAnchorMisses = 0;
+  let toolbarAnchorTimer = null;
   let lastToolbarContainer = null;
   let toolbarPositionTimer = 0;
   let blockedHistory = [];
@@ -1466,6 +1471,7 @@ function requestEntryForActiveContainer() {
 function updateToolbarPosition() {
   if (!settings.enabled) {
     if (toolbar) toolbar.style.display = "none";
+    toolbarAnchorMisses = 0;
     return;
   }
 
@@ -1479,17 +1485,20 @@ function updateToolbarPosition() {
 
   if (isLiveContainer(activeContainer)) {
     toolbar.style.display = "none";
+    toolbarAnchorMisses = 0;
     return;
   }
 
   if (!activeContainer) {
     toolbar.style.display = "none";
+    toolbarAnchorMisses = 0;
     return;
   }
 
   const rect = activeContainer.getBoundingClientRect();
   if (!rect.width || !rect.height) {
     toolbar.style.display = "none";
+    toolbarAnchorMisses = 0;
     return;
   }
 
@@ -1512,25 +1521,34 @@ function updateToolbarPosition() {
   }
 
   const digg = activeContainer.querySelector?.('[data-e2e="video-player-digg"]');
-  const buttonSize = toolbarButton?.getBoundingClientRect().width || 40;
   const diggRect = digg?.getBoundingClientRect();
+  // 用设置里的尺寸，而不是去量刚创建、可能还没渲染完的按钮，
+  // 否则第一次会用默认值算位置，等量到真实宽度后又挪一下。
+  const buttonSize = Math.max(32, Number(settings.buttonSize) || 40);
 
-  toolbar.style.display = "block";
   toolbar.style.position = "fixed";
   toolbar.style.top = `${Math.max(10, targetRect.top + 10)}px`;
-
-  if (diggRect?.width) {
-    const diggCenter = diggRect.left + diggRect.width / 2;
-    toolbar.style.left = `${Math.max(8, diggCenter - buttonSize / 2)}px`;
-    toolbar.style.right = "auto";
-  } else {
-    toolbar.style.left = "auto";
-    toolbar.style.right = `${Math.max(10, window.innerWidth - targetRect.right + 10)}px`;
-  }
-
   toolbar.style.width = "";
   toolbar.style.height = "";
   toolbar.style.margin = "";
+
+  if (diggRect?.width) {
+    toolbarAnchorMisses = 0;
+    const diggCenter = diggRect.left + diggRect.width / 2;
+    toolbar.style.left = `${Math.max(8, diggCenter - buttonSize / 2)}px`;
+    toolbar.style.right = "auto";
+    toolbar.style.display = "block";
+  } else if (toolbarAnchorMisses >= MAX_TOOLBAR_ANCHOR_MISSES) {
+    // 确实找不到点赞图标（页面结构变化等）时才退回到右上角。
+    toolbar.style.left = "auto";
+    toolbar.style.right = `${Math.max(10, window.innerWidth - targetRect.right + 10)}px`;
+    toolbar.style.display = "block";
+  } else {
+    toolbarAnchorMisses += 1;
+    toolbar.style.display = "none";
+    scheduleToolbarAnchorRetry();
+    return;
+  }
 
   const spaceBelow = window.innerHeight - targetRect.bottom;
   toolbarPanel.classList.toggle(
@@ -1542,6 +1560,11 @@ function updateToolbarPosition() {
 function scheduleToolbarPosition() {
     clearTimeout(toolbarPositionTimer);
     toolbarPositionTimer = setTimeout(updateToolbarPosition, 150);
+  }
+
+  function scheduleToolbarAnchorRetry() {
+    clearTimeout(toolbarAnchorTimer);
+    toolbarAnchorTimer = setTimeout(updateToolbarPosition, 120);
   }
 
   window.addEventListener("message", (event) => {

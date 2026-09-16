@@ -166,6 +166,28 @@ const HOOK_SCRIPT = `
         stack: r && r.stack ? String(r.stack).slice(0, 800) : ""
       }));
     });
+
+    // 采样屏蔽按钮出现过程中的位置，用来判断「先出现在右边再跳过去」。
+    window.__posSamples = [];
+    const sampler = setInterval(() => {
+      try {
+        const toolbar = document.querySelector(".douyin-bgm-filter-toolbar");
+        if (!toolbar) return;
+        const display = getComputedStyle(toolbar).display;
+        const rect = toolbar.getBoundingClientRect();
+        const digg = document.querySelector('[data-e2e="video-player-digg"]');
+        const diggRect = digg ? digg.getBoundingClientRect() : null;
+        window.__posSamples.push({
+          t: Math.round(performance.now()),
+          display,
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          diggCenter: diggRect ? Math.round(diggRect.x + diggRect.width / 2) : null
+        });
+      } catch (_) {}
+    }, 50);
+    setTimeout(() => clearInterval(sampler), 12000);
   })();
 `;
 
@@ -307,6 +329,34 @@ const PROBES = {
   // 页面内切换视频的尝试：注意抖音会忽略脚本合成的按键，所以这个探针通常切不动，
   // 真正的切换用 Node 侧的 --walk（走 CDP 的真输入事件）。
   // 看弹窗页里作者 / 标签 / 音乐这些信息在 DOM 上的真实结构，供兜底识别使用。
+  // 屏蔽按钮「出现时先偏右、再挪一下」的量化：看它第一次可见时的位置准不准。
+  flash: `(() => {
+    const all = window.__posSamples || [];
+    const samples = all.filter((s) => s.display !== "none" && s.w > 0);
+    if (!samples.length) {
+      return {
+        note: "采样期间按钮没有可见过",
+        rawSampleCount: all.length,
+        rawFirst: all.slice(0, 6)
+      };
+    }
+
+    const first = samples[0];
+    const firstOffset = first.diggCenter === null ? null : first.x + first.w / 2 - first.diggCenter;
+    const xValues = [];
+    for (const s of samples) {
+      if (!xValues.length || Math.abs(xValues[xValues.length - 1] - s.x) >= 2) xValues.push(s.x);
+    }
+
+    return {
+      firstVisible: first,
+      firstOffsetFromDiggCenter: firstOffset,
+      distinctX: xValues,
+      movedAfterShow: xValues.length > 1,
+      samples: samples.slice(0, 30)
+    };
+  })()`,
+
   dom: `(() => {
     const tidy = (text) => String(text || "").replace(/[\\n\\t ]+/g, " ").trim();
     const pick = (selector) =>
@@ -493,6 +543,10 @@ const WALK_SNAPSHOT = `(() => {
   const panel = document.querySelector(".douyin-bgm-filter-panel");
   const toolbar = document.querySelector(".douyin-bgm-filter-toolbar");
   const toolbarRect = toolbar ? toolbar.getBoundingClientRect() : null;
+  const button = document.querySelector(".douyin-bgm-filter-button");
+  const buttonRect = button ? button.getBoundingClientRect() : null;
+  const digg = document.querySelector('[data-e2e="video-player-digg"]');
+  const diggRect = digg ? digg.getBoundingClientRect() : null;
 
   return {
     modalId: new URLSearchParams(location.search).get("modal_id"),
@@ -502,6 +556,11 @@ const WALK_SNAPSHOT = `(() => {
       ? [Math.round(best.rect.x + best.rect.width / 2), Math.round(best.rect.y + best.rect.height / 2)]
       : [Math.round(innerWidth / 2), Math.round(innerHeight / 2)],
     toolbarDisplay: toolbar ? getComputedStyle(toolbar).display : null,
+    buttonRect: buttonRect
+      ? [Math.round(buttonRect.x), Math.round(buttonRect.y), Math.round(buttonRect.width), Math.round(buttonRect.height)]
+      : null,
+    buttonCenterX: buttonRect && buttonRect.width ? Math.round(buttonRect.x + buttonRect.width / 2) : null,
+    diggCenterX: diggRect && diggRect.width ? Math.round(diggRect.x + diggRect.width / 2) : null,
     panelText: panel
       ? String(panel.innerText || "").replace(/[\\n\\t ]+/g, " ").trim().slice(0, 220)
       : null
@@ -528,7 +587,19 @@ async function runWalk({ cdp, rounds, outDir }) {
   for (let round = 0; round < rounds; round += 1) {
     const clicked = await clickButton();
     await sleep(2200);
-    steps.push({ label: `第 ${round + 1} 次点击后`, clicked, ...(await snapshot()) });
+    const afterClick = { label: `第 ${round + 1} 次点击后`, clicked, ...(await snapshot()) };
+
+    if (round === 0) {
+      // 按钮第一次可见时的位置采样：判断有没有「先偏右、再挪一下」。
+      afterClick.positionSamples = await evaluate(
+        cdp,
+        `(window.__posSamples || []).filter((s) => s.display !== "none" && s.w > 0).slice(0, 12)`,
+        undefined,
+        { timeoutMs: 15000 }
+      );
+    }
+
+    steps.push(afterClick);
 
     await clickButton();
     await sleep(300);
