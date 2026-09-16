@@ -40,7 +40,8 @@ function parseArgs(argv) {
     visible: false,
     keepOpen: false,
     attach: 0,
-    seedProfile: ""
+    seedProfile: "",
+    windowSize: "1360,900"
   };
   for (const arg of argv) {
     const m = /^--([a-zA-Z]+)(?:=(.*))?$/.exec(arg);
@@ -330,6 +331,38 @@ const PROBES = {
   // 真正的切换用 Node 侧的 --walk（走 CDP 的真输入事件）。
   // 看弹窗页里作者 / 标签 / 音乐这些信息在 DOM 上的真实结构，供兜底识别使用。
   // 屏蔽按钮「出现时先偏右、再挪一下」的量化：看它第一次可见时的位置准不准。
+  // 找「哪个祖先元素的右边缘到点赞图标中心的距离是固定值」，用它当几何基准。
+  anchor: `(() => {
+    const digg = document.querySelector('[data-e2e="video-player-digg"]');
+    if (!digg) return { error: "页面上没有点赞图标" };
+    const dr = digg.getBoundingClientRect();
+    const center = dr.x + dr.width / 2;
+    const chain = [];
+    let el = digg.parentElement;
+    for (let i = 0; i < 8 && el; i += 1, el = el.parentElement) {
+      const r = el.getBoundingClientRect();
+      chain.push({
+        level: i + 1,
+        tag: el.tagName,
+        dataE2e: el.getAttribute("data-e2e") || "",
+        cls: String(el.className || "").slice(0, 36),
+        right: Math.round(r.right),
+        width: Math.round(r.width),
+        rightToCenter: Math.round(r.right - center)
+      });
+    }
+    const video = document.querySelector("video");
+    const vr = video ? video.getBoundingClientRect() : null;
+    return {
+      diggCenter: Math.round(center),
+      diggWidth: Math.round(dr.width),
+      videoRight: vr ? Math.round(vr.right) : null,
+      videoToCenter: vr ? Math.round(vr.right - center) : null,
+      windowWidth: window.innerWidth,
+      chain
+    };
+  })()`,
+
   flash: `(() => {
     const all = window.__posSamples || [];
     const samples = all.filter((s) => s.display !== "none" && s.w > 0);
@@ -547,6 +580,8 @@ const WALK_SNAPSHOT = `(() => {
   const buttonRect = button ? button.getBoundingClientRect() : null;
   const digg = document.querySelector('[data-e2e="video-player-digg"]');
   const diggRect = digg ? digg.getBoundingClientRect() : null;
+  const video = document.querySelector("video");
+  const videoRect = video ? video.getBoundingClientRect() : null;
 
   return {
     modalId: new URLSearchParams(location.search).get("modal_id"),
@@ -561,6 +596,14 @@ const WALK_SNAPSHOT = `(() => {
       : null,
     buttonCenterX: buttonRect && buttonRect.width ? Math.round(buttonRect.x + buttonRect.width / 2) : null,
     diggCenterX: diggRect && diggRect.width ? Math.round(diggRect.x + diggRect.width / 2) : null,
+    videoRect: videoRect
+      ? [Math.round(videoRect.x), Math.round(videoRect.y), Math.round(videoRect.width), Math.round(videoRect.height)]
+      : null,
+    videoRight: videoRect ? Math.round(videoRect.right) : null,
+    diggInsetFromVideoRight:
+      diggRect && diggRect.width && videoRect
+        ? Math.round(videoRect.right - (diggRect.x + diggRect.width / 2))
+        : null,
     panelText: panel
       ? String(panel.innerText || "").replace(/[\\n\\t ]+/g, " ").trim().slice(0, 220)
       : null
@@ -961,7 +1004,7 @@ async function main() {
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-background-timer-throttling",
-    "--window-size=1360,900",
+    `--window-size=${opts.windowSize}`,
     "--lang=zh-CN",
     "about:blank"
   ];

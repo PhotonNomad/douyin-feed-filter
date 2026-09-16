@@ -51,8 +51,9 @@
   const DEBUG_LOG_KEY = "debugLog";
   const DEBUG_LOG_LIMIT = 300;
   const DEBUG_TEXT_LIMIT = 400;
-  // 等点赞图标出现最多重试几次（每次 120ms），超了才退回右上角。
-  const MAX_TOOLBAR_ANCHOR_MISSES = 8;
+  // 抖音 PC 网页版操作栏图标中心，大约在视频右边缘往左 37~41px（实测三种窗口宽度），
+  // 取中值 39px，误差不超过 ±2px。要用到视频/播放器容器的右边缘，所以不依赖点赞图标。
+  const RAIL_CENTER_INSET = 39;
 
   let debugEvents = [];
   let debugPersistTimer = null;
@@ -193,9 +194,8 @@
   let toolbar = null;
   let toolbarButton = null;
   let toolbarPanel = null;
-  // 位置还没算准时先不显示按钮，避免「先出现在右边、再跳到点赞位置」。
-  let toolbarAnchorMisses = 0;
-  let toolbarAnchorTimer = null;
+  // 记录上一次「算出来的 X」和真实点赞图标中心的偏差，只用于日志，不参与定位。
+  let lastAnchorDrift = null;
   let lastToolbarContainer = null;
   let toolbarPositionTimer = 0;
   let blockedHistory = [];
@@ -1471,7 +1471,6 @@ function requestEntryForActiveContainer() {
 function updateToolbarPosition() {
   if (!settings.enabled) {
     if (toolbar) toolbar.style.display = "none";
-    toolbarAnchorMisses = 0;
     return;
   }
 
@@ -1485,20 +1484,17 @@ function updateToolbarPosition() {
 
   if (isLiveContainer(activeContainer)) {
     toolbar.style.display = "none";
-    toolbarAnchorMisses = 0;
     return;
   }
 
   if (!activeContainer) {
     toolbar.style.display = "none";
-    toolbarAnchorMisses = 0;
     return;
   }
 
   const rect = activeContainer.getBoundingClientRect();
   if (!rect.width || !rect.height) {
     toolbar.style.display = "none";
-    toolbarAnchorMisses = 0;
     return;
   }
 
@@ -1520,8 +1516,6 @@ function updateToolbarPosition() {
     targetRect = largestVideo;
   }
 
-  const digg = activeContainer.querySelector?.('[data-e2e="video-player-digg"]');
-  const diggRect = digg?.getBoundingClientRect();
   // 用设置里的尺寸，而不是去量刚创建、可能还没渲染完的按钮，
   // 否则第一次会用默认值算位置，等量到真实宽度后又挪一下。
   const buttonSize = Math.max(32, Number(settings.buttonSize) || 40);
@@ -1532,23 +1526,14 @@ function updateToolbarPosition() {
   toolbar.style.height = "";
   toolbar.style.margin = "";
 
-  if (diggRect?.width) {
-    toolbarAnchorMisses = 0;
-    const diggCenter = diggRect.left + diggRect.width / 2;
-    toolbar.style.left = `${Math.max(8, diggCenter - buttonSize / 2)}px`;
-    toolbar.style.right = "auto";
-    toolbar.style.display = "block";
-  } else if (toolbarAnchorMisses >= MAX_TOOLBAR_ANCHOR_MISSES) {
-    // 确实找不到点赞图标（页面结构变化等）时才退回到右上角。
-    toolbar.style.left = "auto";
-    toolbar.style.right = `${Math.max(10, window.innerWidth - targetRect.right + 10)}px`;
-    toolbar.style.display = "block";
-  } else {
-    toolbarAnchorMisses += 1;
-    toolbar.style.display = "none";
-    scheduleToolbarAnchorRetry();
-    return;
-  }
+  // X 轴直接用几何算：抖音操作栏的图标中心固定落在视频右边缘往左 40px 处，
+  // 不去查询点赞图标本身——它比按钮晚一帧渲染，查它就会「先出现在右边再挪一下」。
+  const anchorCenterX = targetRect.right - RAIL_CENTER_INSET;
+  toolbar.style.left = `${Math.max(8, anchorCenterX - buttonSize / 2)}px`;
+  toolbar.style.right = "auto";
+  toolbar.style.display = "block";
+
+  reportAnchorDrift(activeContainer, anchorCenterX, targetRect);
 
   const spaceBelow = window.innerHeight - targetRect.bottom;
   toolbarPanel.classList.toggle(
@@ -1562,9 +1547,28 @@ function scheduleToolbarPosition() {
     toolbarPositionTimer = setTimeout(updateToolbarPosition, 150);
   }
 
-  function scheduleToolbarAnchorRetry() {
-    clearTimeout(toolbarAnchorTimer);
-    toolbarAnchorTimer = setTimeout(updateToolbarPosition, 120);
+  // 只做诊断：我们不再用点赞图标定位，但如果算出来的 X 和真实图标中心差得多，
+  // 说明抖音换了布局，往日志里记一条（不改变按钮位置，避免又跳一下）。
+  function reportAnchorDrift(container, anchorCenterX, targetRect) {
+    try {
+      const digg = container?.querySelector?.('[data-e2e="video-player-digg"]');
+      const diggRect = digg?.getBoundingClientRect();
+      if (!diggRect?.width) return;
+
+      const drift = Math.round(diggRect.left + diggRect.width / 2 - anchorCenterX);
+      if (Math.abs(drift) <= 6) {
+        lastAnchorDrift = drift;
+        return;
+      }
+
+      if (lastAnchorDrift !== null && Math.abs(lastAnchorDrift - drift) <= 2) return;
+      lastAnchorDrift = drift;
+      logEvent("info", "按几何算出的按钮 X 与点赞图标中心有偏差", {
+        drift,
+        videoRight: Math.round(targetRect.right),
+        inset: RAIL_CENTER_INSET
+      });
+    } catch (_) {}
   }
 
   window.addEventListener("message", (event) => {
