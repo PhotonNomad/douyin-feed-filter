@@ -1,0 +1,16 @@
+# 打包产物：由 scripts/build.ps1 重新生成，不入库
+*.zip
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+node_modules/
+
+# 临时文件与日志
+*.log
+*.tmp
+tmp/
+

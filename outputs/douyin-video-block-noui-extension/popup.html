@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>抖音视频屏蔽</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>抖音视频屏蔽</h1>
+      <label class="switch">
+        <input type="checkbox" id="enabled" />
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <main>
+      <section>
+        <div class="section-head">
+          <h2>已屏蔽</h2>
+          <button id="clearBlocked" class="ghost small">清空</button>
+        </div>
+        <div id="blockedList" class="list"></div>
+        <p id="blockedEmpty" class="empty">暂无屏蔽项。</p>
+      </section>
+
+      <section>
+        <h2>手动添加</h2>
+        <div class="manual-row">
+          <select id="manualType">
+            <option value="music">音乐</option>
+            <option value="author">博主</option>
+            <option value="tag">标签</option>
+          </select>
+          <input
+            id="manualInput"
+            type="text"
+            placeholder="输入 ID、标题、昵称或标签"
+          />
+          <button id="manualAdd">添加</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>按钮样式</h2>
+        <div class="style-row">
+          <label for="buttonIcon">图标</label>
+          <select id="buttonIcon">
+            <option value="not-interested">不感兴趣（默认）</option>
+            <option value="heart">爱心</option>
+            <option value="star">五角星</option>
+            <option value="comment">评论</option>
+            <option value="share">分享</option>
+            <option value="custom">自定义</option>
+          </select>
+        </div>
+        <div class="style-row">
+          <label for="customIcon">自定义图标</label>
+          <input id="customIcon" type="text" maxlength="8" placeholder="emoji / 1-2 字符" />
+        </div>
+        <div class="style-row">
+          <label for="buttonSize">大小</label>
+          <input id="buttonSize" type="range" min="32" max="56" step="2" />
+          <span id="buttonSizeValue">40px</span>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      使用抖音网页版返回的官方字段；优先在网络响应层过滤。
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

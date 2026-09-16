@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>抖音视频屏蔽</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>抖音视频屏蔽</h1>
+      <label class="switch">
+        <input type="checkbox" id="enabled" />
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <main>
+      <section>
+        <div class="section-head">
+          <h2>已屏蔽</h2>
+          <button id="clearBlocked" class="ghost small">清空</button>
+        </div>
+        <div id="blockedList" class="list"></div>
+        <p id="blockedEmpty" class="empty">暂无屏蔽项。</p>
+      </section>
+
+      <section>
+        <h2>手动添加</h2>
+        <div class="manual-row">
+          <select id="manualType">
+            <option value="music">音乐</option>
+            <option value="author">博主</option>
+            <option value="tag">标签</option>
+          </select>
+          <input
+            id="manualInput"
+            type="text"
+            placeholder="输入 ID、标题、昵称或标签"
+          />
+          <button id="manualAdd">添加</button>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>屏蔽记录</h2>
+          <button id="clearHistory" class="ghost small">清空</button>
+        </div>
+        <div id="historyList" class="list"></div>
+        <p id="historyEmpty" class="empty">暂无屏蔽记录。</p>
+      </section>
+
+      <section>
+        <h2>按钮样式</h2>
+        <div class="icon-uploader">
+          <div
+            id="iconPreviewBox"
+            class="icon-preview"
+            role="button"
+            tabindex="0"
+            aria-label="上传按钮图标"
+          >
+            <img id="iconPreview" alt="图标预览" />
+            <span id="iconPreviewText">默认</span>
+          </div>
+          <div class="icon-help">
+            <strong>点击图片上传</strong>
+            <span>自动缩放到最大 64px，保持比例</span>
+          </div>
+          <button id="clearIcon" class="ghost small">恢复默认</button>
+        </div>
+        <input id="iconFile" type="file" accept="image/*" hidden />
+        <div class="style-row">
+          <label for="buttonSize">大小</label>
+          <input id="buttonSize" type="range" min="32" max="56" step="2" />
+          <span id="buttonSizeValue">40px</span>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      使用抖音网页版返回的官方字段；优先在网络响应层过滤。
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
