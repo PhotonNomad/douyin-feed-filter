@@ -33,7 +33,8 @@ function parseArgs(argv) {
     port: 9400 + Math.floor(Math.random() * 400),
     keepProfile: false,
     outDir: "",
-    probe: ""
+    probe: "",
+    test: ""
   };
   for (const arg of argv) {
     const m = /^--([a-zA-Z]+)(?:=(.*))?$/.exec(arg);
@@ -351,6 +352,91 @@ const PROBES = {
 };
 
 // 从扩展源码里按名字抠出函数体，塞进页面里跑，验证的才是真正会上线的代码。
+function detectExtensionId(contexts) {
+  for (const [, info] of contexts) {
+    const match = /^chrome-extension:\/\/([a-p]{32})$/.exec(info.origin || "");
+    if (match) return match[1];
+  }
+  return "";
+}
+
+async function openBrowserCdp(port) {
+  const info = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  const ws = new WebSocket(info.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", resolve, { once: true });
+    ws.addEventListener("error", () => reject(new Error("连接浏览器级 CDP 失败")), { once: true });
+  });
+  return new Cdp(ws);
+}
+
+// 真正打开扩展的 popup 页面、点一次「导出诊断日志」，再把下载下来的文件读回来。
+async function runPopupExportTest({ port, extId, outDir }) {
+  const browser = await openBrowserCdp(port);
+  const downloadDir = path.join(outDir, "downloads");
+  fs.mkdirSync(downloadDir, { recursive: true });
+
+  const pageErrors = [];
+  browser.on("Runtime.exceptionThrown", (p) => {
+    pageErrors.push(p.exceptionDetails?.exception?.description || p.exceptionDetails?.text);
+  });
+
+  await browser.send("Browser.setDownloadBehavior", {
+    behavior: "allow",
+    downloadPath: downloadDir,
+    eventsEnabled: true
+  });
+
+  const { targetId } = await browser.send("Target.createTarget", {
+    url: `chrome-extension://${extId}/popup.html`
+  });
+  const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
+  await browser.send("Runtime.enable", {}, sessionId);
+  await browser.send("Page.enable", {}, sessionId);
+  await sleep(1500);
+
+  const evaluated = await browser.send(
+    "Runtime.evaluate",
+    {
+      expression: `(async () => {
+        const status = document.getElementById("logStatus");
+        const button = document.getElementById("exportLog");
+        if (!button) return { error: "popup 里没有导出按钮" };
+        const before = status ? status.textContent : "";
+        button.click();
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        return {
+          before,
+          after: status ? status.textContent : "",
+          hasCopyButton: Boolean(document.getElementById("copyLog")),
+          hasClearButton: Boolean(document.getElementById("clearLog"))
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    },
+    sessionId
+  );
+
+  await sleep(2000);
+  const files = fs.readdirSync(downloadDir).map((name) => {
+    const full = path.join(downloadDir, name);
+    const content = fs.readFileSync(full, "utf8");
+    return {
+      name,
+      bytes: Buffer.byteLength(content, "utf8"),
+      lineCount: content.split(/\r?\n/).length,
+      lines: content.split(/\r?\n/).slice(0, 40)
+    };
+  });
+
+  try {
+    await browser.send("Target.closeTarget", { targetId });
+  } catch (_) {}
+
+  return { extId, downloadDir, popup: evaluated?.result?.value, files, pageErrors };
+}
+
 function extractFunctionSource(source, name) {
   const start = source.indexOf(`function ${name}(`);
   if (start < 0) return "";
@@ -507,7 +593,10 @@ async function main() {
     cdp = new Cdp(ws);
 
     cdp.on("Runtime.executionContextCreated", ({ context }) => {
-      contexts.set(context.id, context.auxData?.type || context.name || "unknown");
+      contexts.set(context.id, {
+        name: context.auxData?.type || context.name || "unknown",
+        origin: context.origin || context.auxData?.origin || ""
+      });
     });
     cdp.on("Runtime.executionContextDestroyed", ({ executionContextId }) => {
       contexts.delete(executionContextId);
@@ -516,7 +605,7 @@ async function main() {
       record({
         kind: "console",
         level: p.type,
-        context: contexts.get(p.executionContextId) || String(p.executionContextId),
+        context: contexts.get(p.executionContextId)?.name || String(p.executionContextId),
         args: (p.args || []).map((a) => ({
           type: a.type,
           value: a.value,
@@ -529,7 +618,7 @@ async function main() {
       const d = p.exceptionDetails || {};
       record({
         kind: "exception",
-        context: contexts.get(d.executionContextId) || String(d.executionContextId),
+        context: contexts.get(d.executionContextId)?.name || String(d.executionContextId),
         text: d.exception?.description || d.text || "未知异常",
         stack: d.stackTrace?.callFrames
           ?.slice(0, 8)
@@ -585,6 +674,30 @@ async function main() {
       const probeResult = await evaluate(cdp, probe, undefined, { awaitPromise: true });
       fs.writeFileSync(path.join(outDir, "probe.json"), JSON.stringify(probeResult, null, 2), "utf8");
       console.log(`探针 ${opts.probe} 结果：\n${JSON.stringify(probeResult, null, 2)}`);
+      return;
+    }
+
+    if (opts.test === "popupexport") {
+      const extId = detectExtensionId(contexts);
+      if (!extId) throw new Error("没有找到扩展 ID（隔离世界上下文里没有 chrome-extension 来源）");
+
+      // 先真在页面上操作一遍，日志里才有识别/过滤记录可以导出。
+      if (opts.click) {
+        await evaluate(
+          cdp,
+          `(() => {
+            const button = document.querySelector(".douyin-bgm-filter-button");
+            if (!button) return false;
+            button.click();
+            return true;
+          })()`
+        );
+        await sleep(4000);
+      }
+
+      const result = await runPopupExportTest({ port: opts.port, extId, outDir });
+      fs.writeFileSync(path.join(outDir, "popup-test.json"), JSON.stringify(result, null, 2), "utf8");
+      console.log(`Popup 导出测试：\n${JSON.stringify(result, null, 2)}`);
       return;
     }
 
@@ -662,9 +775,9 @@ function renderReport({ opts, beforeClick, clickResult, afterClick, events, prof
   lines.push(`- 扩展目录：${opts.ext}`);
   lines.push(`- 临时配置目录：${profileDir}`);
   lines.push(`- 预热时长：${opts.seconds}s${opts.click ? `，点击后观察 ${opts.afterClick}s` : ""}`);
-  const isolated = contexts.filter(([, name]) => name !== "default");
+  const isolated = contexts.filter(([, info]) => info.name !== "default");
   lines.push(
-    `- 执行上下文：共 ${contexts.length} 个（隔离世界 ${isolated.length} 个：${isolated.map(([, n]) => n).join(", ") || "无"}）`
+    `- 执行上下文：共 ${contexts.length} 个（隔离世界 ${isolated.length} 个：${isolated.map(([, info]) => info.name).join(", ") || "无"}）`
   );
   lines.push("");
 

@@ -12,6 +12,25 @@
     enabled: true,
     blocked: {}
   };
+
+  // 诊断日志：数据层在 MAIN world，只能把记录转发给隔离世界，由它统一保存和导出。
+  function logEvent(level, message, data) {
+    try {
+      window.postMessage(
+        {
+          source: MESSAGE_SOURCE,
+          type: "log",
+          record: {
+            t: Date.now(),
+            level,
+            message: String(message).slice(0, 400),
+            data
+          }
+        },
+        window.location.origin
+      );
+    } catch (_) {}
+  }
   let settingsReadyResolve = null;
   const settingsReady = new Promise((resolve) => {
     settingsReadyResolve = resolve;
@@ -493,7 +512,7 @@
     };
   }
 
-  function filterFeedText(text) {
+  function filterFeedText(text, requestUrl) {
     if (!text || text.length > MAX_BODY_BYTES) return null;
 
     let data;
@@ -505,6 +524,17 @@
 
     const result = filterFeedData(data);
     result.text = JSON.stringify(result.data);
+
+    if (result.total > 0) {
+      logEvent("info", "数据层处理了一批推荐", {
+        url: String(requestUrl || "").slice(0, 160),
+        total: result.total,
+        removed: result.removed,
+        allowed: result.allowed,
+        hasMore: result.hasMore
+      });
+    }
+
     return result;
   }
 
@@ -534,6 +564,14 @@
         window.location.origin
       );
     } catch (_) {}
+
+    logEvent("info", "按规则移除了一个视频", {
+      awemeId: record?.awemeId,
+      rule: record?.ruleLabel,
+      ruleKind: record?.ruleKind,
+      author: record?.author,
+      title: record?.title
+    });
   }
 
   function buildBlockedRecord(entry, rule) {
@@ -647,16 +685,27 @@
     if (!awemeId) return [];
 
     const entries = [];
+    const started = Date.now();
+    const stats = {
+      scripts: document.scripts.length,
+      withId: 0,
+      decoded: 0,
+      idFound: 0,
+      authorFound: 0
+    };
 
     for (const script of document.scripts) {
       const rawText = script.textContent || "";
       // 先做零成本过滤：只有真的提到这个 id、且不算超大的脚本才值得解码。
       if (!rawText.includes(awemeId)) continue;
       if (rawText.length > MAX_SSR_SCRIPT_CHARS) continue;
+      stats.withId += 1;
 
       const text = decodeScriptTextCached(script);
+      stats.decoded += 1;
       const positions = findAwemeOccurrences(text, awemeId);
       if (!positions.length) continue;
+      stats.idFound += positions.length;
 
       for (let i = 0; i < positions.length; i += 1) {
         const start = positions[i];
@@ -667,6 +716,7 @@
         const block = text.slice(start, end);
         const authorIndex = block.search(/"authorInfo"\s*:/);
         if (authorIndex < 0) continue;
+        stats.authorFound += 1;
 
         const author = extractScriptString(block, "nickname", authorIndex);
         const authorId = extractScriptString(block, "uid", authorIndex);
@@ -703,6 +753,12 @@
     }
 
     ssrEntriesCache.set(awemeId, entries);
+    logEvent("info", "SSR 兜底解析结束", {
+      awemeId,
+      entries: entries.length,
+      ms: Date.now() - started,
+      ...stats
+    });
     return entries;
   }
 
@@ -724,6 +780,9 @@
         } catch (error) {
           // 解析失败只当没识别到，绝不把异常抛回页面主线程。
           console.error("[douyin-bgm-filter] SSR 解析失败", error);
+          logEvent("error", "SSR 兜底解析抛错", {
+            message: String(error?.message || error)
+          });
           entries = [];
         }
 
@@ -811,7 +870,7 @@
 
     for (let page = 0; page < MAX_PREFETCH_FEED_PAGES; page++) {
       const text = await currentResponse.clone().text();
-      const filtered = filterFeedText(text);
+      const filtered = filterFeedText(text, currentUrl);
 
       parseResponseBody(text, currentUrl);
 
@@ -871,8 +930,11 @@
             .then((text) => parseResponseBody(text, url))
             .catch(() => {});
         }
-      } catch (_) {
+      } catch (error) {
         // 解析失败不能影响抖音页面本身。
+        logEvent("error", "处理响应时出错", {
+          message: String(error?.message || error)
+        });
       }
 
       return response;
@@ -930,7 +992,7 @@
     if (!isFeedUrl(url)) return;
 
     const text = getXhrText(xhr);
-    const filtered = filterFeedText(text);
+    const filtered = filterFeedText(text, url);
     if (!filtered || filtered.removed === 0) {
       xhr.__douyinBgmFilterFinalized = true;
       parseResponseBody(text, url);

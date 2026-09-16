@@ -44,6 +44,148 @@
   const knownEntries = new Map();
   const requestedEntries = new Set();
 
+  // ---- 诊断日志 -----------------------------------------------------------
+  // 只保存在浏览器本地。环形缓冲，最多 300 条，写入做了节流，
+  // 用户点 popup 里的「导出诊断日志」就能拿到一份可以直接排查的文本。
+  const DEBUG_LOG_KEY = "debugLog";
+  const DEBUG_LOG_LIMIT = 300;
+  const DEBUG_TEXT_LIMIT = 400;
+
+  let debugEvents = [];
+  let debugPersistTimer = null;
+  let debugDirty = false;
+
+  function trimDebugValue(value, depth = 0) {
+    if (value === null || value === undefined) return value;
+    if (typeof value === "string") {
+      return value.length > DEBUG_TEXT_LIMIT
+        ? `${value.slice(0, DEBUG_TEXT_LIMIT)}…(${value.length})`
+        : value;
+    }
+    if (typeof value === "number" || typeof value === "boolean") return value;
+    if (depth >= 2) return "[深层数据]";
+    if (Array.isArray(value)) {
+      return value.slice(0, 12).map((item) => trimDebugValue(item, depth + 1));
+    }
+    if (typeof value === "object") {
+      const output = {};
+      for (const [key, item] of Object.entries(value).slice(0, 20)) {
+        output[key] = trimDebugValue(item, depth + 1);
+      }
+      return output;
+    }
+    return String(value).slice(0, DEBUG_TEXT_LIMIT);
+  }
+
+  function flushDebugLog() {
+    if (!debugDirty) return;
+    debugDirty = false;
+
+    try {
+      const storage = chrome?.storage?.local;
+      if (!storage) return;
+      storage.set({ [DEBUG_LOG_KEY]: debugEvents }, () => {
+        // 扩展重载后上下文失效会走到这里，忽略即可。
+        void chrome.runtime?.lastError;
+      });
+    } catch (_) {}
+  }
+
+  function scheduleDebugPersist() {
+    if (debugPersistTimer) return;
+    debugPersistTimer = setTimeout(() => {
+      debugPersistTimer = null;
+      flushDebugLog();
+    }, 2500);
+  }
+
+  function logEvent(level, message, data) {
+    try {
+      const record = {
+        t: Date.now(),
+        level,
+        message: String(message).slice(0, DEBUG_TEXT_LIMIT)
+      };
+
+      if (data !== undefined) record.data = trimDebugValue(data);
+      if (typeof location !== "undefined") {
+        record.page = `${location.pathname}${location.search}`.slice(0, 120);
+      }
+
+      debugEvents.push(record);
+      if (debugEvents.length > DEBUG_LOG_LIMIT) {
+        debugEvents.splice(0, debugEvents.length - DEBUG_LOG_LIMIT);
+      }
+
+      debugDirty = true;
+      if (level === "error") {
+        flushDebugLog();
+        console.warn("[抖音视频屏蔽]", message, data ?? "");
+      } else {
+        scheduleDebugPersist();
+      }
+    } catch (_) {}
+  }
+
+  function loadPreviousDebugLog() {
+    try {
+      const storage = chrome?.storage?.local;
+      if (!storage) return;
+
+      storage.get({ [DEBUG_LOG_KEY]: [] }, (items) => {
+        void chrome.runtime?.lastError;
+        const previous = Array.isArray(items?.[DEBUG_LOG_KEY]) ? items[DEBUG_LOG_KEY] : [];
+        if (!previous.length) return;
+
+        debugEvents = previous.concat(debugEvents).slice(-DEBUG_LOG_LIMIT);
+        scheduleDebugPersist();
+      });
+    } catch (_) {}
+  }
+
+  window.addEventListener("error", (event) => {
+    logEvent("error", "页面里出现未捕获错误", {
+      message: event.message,
+      file: event.filename,
+      line: event.lineno,
+      column: event.colno
+    });
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason;
+    logEvent("error", "出现未处理的 Promise 拒绝", {
+      message: reason?.message || String(reason || "")
+    });
+  });
+
+  try {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === "douyin-bgm-filter/dump-log") {
+        flushDebugLog();
+        sendResponse({
+          events: debugEvents.slice(),
+          meta: {
+            url: location.href,
+            version: chrome.runtime.getManifest?.().version || "",
+            capturedAt: Date.now()
+          }
+        });
+        return true;
+      }
+
+      if (message?.type === "douyin-bgm-filter/clear-log") {
+        debugEvents = [];
+        debugDirty = true;
+        flushDebugLog();
+        sendResponse({ ok: true });
+        return true;
+      }
+
+      return false;
+    });
+  } catch (_) {}
+
   let activeContainer = null;
   let toolbar = null;
   let toolbarButton = null;
@@ -603,6 +745,10 @@
     const cleanRules = (rules || []).filter(Boolean);
     if (!cleanRules.length) return;
 
+    logEvent("info", "保存屏蔽规则", {
+      rules: cleanRules.map((rule) => ({ key: rule.key, kind: rule.kind, label: rule.label }))
+    });
+
     const now = Date.now();
     for (const rule of cleanRules) {
       settings.blocked[rule.key] = {
@@ -620,8 +766,12 @@
 
       storage.set({ blocked: settings.blocked }, () => {
         // 忽略扩展重载/上下文失效导致的存储错误，避免影响页面。
+        const error = chrome?.runtime?.lastError;
+        if (error) logEvent("error", "保存屏蔽规则失败", { message: error.message });
       });
-    } catch (_) {}
+    } catch (error) {
+      logEvent("error", "保存屏蔽规则时抛错", { message: String(error?.message || error) });
+    }
 
     sendNativeNotInterested();
   }
@@ -1064,6 +1214,16 @@
     knownEntries.set(entry.awemeId, entry);
   }
 
+  logEvent("info", "识别到视频数据", {
+    awemeId: entry.awemeId,
+    author: entry.author,
+    authorId: entry.authorId,
+    musicId: entry.musicId,
+    title: entry.title,
+    tags: (entry.tags || []).length,
+    source: entry.source
+  });
+
   // updateToolbarPosition() 在切换到新的视频容器时会把面板收起来，
   // 所以这里先记住面板状态，再把新数据渲染回去，避免刚拿到数据面板就没了。
   const keepPanelOpen = Boolean(toolbarPanel?.classList.contains("open"));
@@ -1179,15 +1339,27 @@ function findLocalAwemeIndex(text, awemeId) {
 function extractLocalSsrEntry(awemeId) {
   if (!awemeId) return null;
 
+  const started = Date.now();
+  const stats = {
+    scripts: document.scripts.length,
+    withId: 0,
+    decoded: 0,
+    idFound: 0,
+    authorFound: 0
+  };
+
   for (const script of document.scripts) {
     const rawText = script.textContent || "";
     // 只有第 1 次真正做解码，之后命中同一个脚本直接用缓存。
     if (!rawText.includes(awemeId)) continue;
     if (rawText.length > MAX_LOCAL_SSR_SCRIPT_CHARS) continue;
+    stats.withId += 1;
 
     const text = decodeLocalScriptTextCached(script);
+    stats.decoded += 1;
     const startIndex = findLocalAwemeIndex(text, awemeId);
     if (startIndex < 0) continue;
+    stats.idFound += 1;
 
     const block = text.slice(
       startIndex,
@@ -1195,6 +1367,7 @@ function extractLocalSsrEntry(awemeId) {
     );
     const authorIndex = block.search(/"authorInfo"\s*:/);
     if (authorIndex < 0) continue;
+    stats.authorFound += 1;
 
     const author = extractLocalScriptString(block, "nickname", authorIndex);
     const authorId = extractLocalScriptString(block, "uid", authorIndex);
@@ -1221,33 +1394,55 @@ function extractLocalSsrEntry(awemeId) {
     };
   }
 
+  logEvent("info", "本地 SSR 没有解析出视频数据", {
+    awemeId,
+    ms: Date.now() - started,
+    ...stats
+  });
+
   return null;
 }
 
 function requestEntryForActiveContainer() {
   let containerId = findContainerAwemeId(activeContainer);
+  let idSource = containerId ? "dom" : "";
   if (!containerId) {
     try {
       containerId =
         new URLSearchParams(window.location.search).get("modal_id") || "";
+      if (containerId) idSource = "modal_id";
     } catch (_) {}
   }
   if (!containerId) {
     // /video/<id> 这类详情页地址栏里没有 modal_id，直接从路径里取。
     const pathMatch = window.location.pathname.match(/\/video\/(\d{6,})/);
-    if (pathMatch) containerId = pathMatch[1];
+    if (pathMatch) {
+      containerId = pathMatch[1];
+      idSource = "url-path";
+    }
   }
 
   if (!containerId) return;
   if (knownEntries.has(containerId) || requestedEntries.has(containerId)) return;
 
   requestedEntries.add(containerId);
+  logEvent("info", "开始识别当前视频", { awemeId: containerId, from: idSource });
 
+  const ssrStarted = Date.now();
   const localEntry = extractLocalSsrEntry(containerId);
   if (localEntry) {
+    logEvent("info", "本地 SSR 解析成功", {
+      awemeId: containerId,
+      ms: Date.now() - ssrStarted
+    });
     handleEntry(localEntry);
     return;
   }
+
+  logEvent("info", "本地 SSR 未命中，改为向数据层查询", {
+    awemeId: containerId,
+    ms: Date.now() - ssrStarted
+  });
 
   try {
     window.postMessage(
@@ -1353,6 +1548,9 @@ function scheduleToolbarPosition() {
       requestedEntries.delete(data.awemeId);
     }
     if (data.type === "blocked" && data.record) saveBlockedRecord(data.record);
+    if (data.type === "log" && data.record) {
+      logEvent(data.record.level || "info", data.record.message || "", data.record.data);
+    }
     if (data.type === "ready") postSettingsToMain();
   });
 
@@ -1386,6 +1584,12 @@ function scheduleToolbarPosition() {
   loadSettings();
   loadBlockedHistory();
   startObserver();
+  loadPreviousDebugLog();
+  logEvent("info", "扩展在页面上启动", {
+    version: chrome?.runtime?.getManifest?.().version || "",
+    scriptsAtStart: document.scripts.length,
+    toolbar: Boolean(toolbar)
+  });
 
   window.addEventListener("scroll", updateToolbarPosition, { passive: true });
   window.addEventListener("resize", updateToolbarPosition);

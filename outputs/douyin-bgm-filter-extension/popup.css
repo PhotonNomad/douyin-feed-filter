@@ -131,6 +131,19 @@ button.small {
   gap: 8px;
 }
 
+.hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #4c5a66;
+}
+
+.diagnostic-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .style-row {
   display: flex;
   align-items: center;

@@ -44,6 +44,17 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 
 ## 自己复现问题并抓错误（自动调试）
 
+### 给使用者：导出诊断日志
+
+扩展弹窗底部有「诊断」区：
+
+- **导出诊断日志**：下载一个 txt，里面是扩展自己的运行记录（启动、识别到的博主/标签/BGM、过滤了多少条、报错信息、当时页面地址）。
+- **复制 / 清空**：把内容复制到剪贴板，或清掉本地记录。
+
+日志只保存在本机、不上传。遇到问题时导出这份文件发给开发者即可，不需要自己去翻控制台。
+
+### 给开发：自动复现环境
+
 `work/cdp-debug.js` 用 Chrome DevTools Protocol 驱动一个**独立浏览器**（独立临时配置目录，和日常浏览互不影响）加载本扩展、打开指定页面，并生成一份报告：控制台报错、未捕获异常、失败请求、长任务（卡顿毫秒数）、按钮与面板状态、面板实际内容。
 
 ```powershell
@@ -53,6 +64,7 @@ node work/cdp-debug.js --chrome="C:\Program Files (x86)\Microsoft\Edge\Applicati
 
 - 报告与原始事件写到 `work/logs/<时间戳>/`（`report.md` + `events.json`）。
 - `--probe=ssr` 看页面里 SSR 数据的真实结构；`--probe=decode` 看百分号解码后的内容；`--probe=flow` 点击按钮并把扩展内部来回传递的消息全部录下来；`--probe=isolated` 直接在页面里跑扩展当前的解析函数。
+- `--test=popupexport` 自动打开扩展的 popup、点一次「导出诊断日志」，把下载下来的文件读回来校验（配合 `--click` 可先真实操作一遍再导出）。
 - **Chrome 153 起官方版已忽略 `--load-extension`**（日志里会写 `--disable-extensions-except is not allowed in Google Chrome`），所以默认用 Edge；其它 Chromium 用 `--chrome=` 指定。
 
 ## 设计原则
