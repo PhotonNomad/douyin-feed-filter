@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音视频屏蔽",
-  "version": "0.5.19",
+  "version": "0.5.20",
   "description": "基于抖音网页版返回的官方字段，在网络响应层屏蔽指定 BGM、博主或标签。",
   "permissions": [
     "storage"

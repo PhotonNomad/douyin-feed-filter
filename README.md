@@ -42,6 +42,19 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 
 默认输出 `outputs/douyin-bgm-filter-extension.zip`，也可用 `-Source` / `-Output` 指定其它扩展或输出路径。
 
+## 自己复现问题并抓错误（自动调试）
+
+`work/cdp-debug.js` 用 Chrome DevTools Protocol 驱动一个**独立浏览器**（独立临时配置目录，和日常浏览互不影响）加载本扩展、打开指定页面，并生成一份报告：控制台报错、未捕获异常、失败请求、长任务（卡顿毫秒数）、按钮与面板状态、面板实际内容。
+
+```powershell
+node work/cdp-debug.js --chrome="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+  --url="https://www.douyin.com/jingxuan?modal_id=7684253090765180179" --seconds=15 --click
+```
+
+- 报告与原始事件写到 `work/logs/<时间戳>/`（`report.md` + `events.json`）。
+- `--probe=ssr` 看页面里 SSR 数据的真实结构；`--probe=decode` 看百分号解码后的内容；`--probe=flow` 点击按钮并把扩展内部来回传递的消息全部录下来；`--probe=isolated` 直接在页面里跑扩展当前的解析函数。
+- **Chrome 153 起官方版已忽略 `--load-extension`**（日志里会写 `--disable-extensions-except is not allowed in Google Chrome`），所以默认用 Edge；其它 Chromium 用 `--chrome=` 指定。
+
 ## 设计原则
 
 这些是用户明确要求、后续维护不能违反的约束：
@@ -59,4 +72,3 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 - 版本历史：[CHANGELOG.md](CHANGELOG.md)
 - 隐私说明：`outputs/douyin-bgm-filter-extension/PRIVACY.md`
 - 主扩展使用说明：`outputs/douyin-bgm-filter-extension/README.md`
-

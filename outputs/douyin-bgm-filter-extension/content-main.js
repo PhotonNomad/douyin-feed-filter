@@ -603,6 +603,46 @@
     }
   }
 
+  // 详情页 / 精选页的视频数据藏在 <script> 文本里，单个脚本可能几百 KB。
+  // 下面这套扫描必须严格有限：旧实现用 exec 配手动回写 lastIndex，一旦命中就会
+  // 反复取到同一个匹配、永远出不了循环，直接把页面主线程卡死。
+  const MAX_SSR_BLOCK_CHARS = 140000;
+  const MAX_SSR_BLOCKS_PER_SCRIPT = 8;
+  const MAX_SSR_SCRIPT_CHARS = 6000000;
+  const SSR_AWEME_ID_KEYS = ['"awemeId"', '"aweme_id"'];
+  const decodedScriptCache = new WeakMap();
+
+  function decodeScriptTextCached(script) {
+    const cached = decodedScriptCache.get(script);
+    if (typeof cached === "string") return cached;
+
+    const decoded = decodeScriptText(script.textContent || "");
+    decodedScriptCache.set(script, decoded);
+    return decoded;
+  }
+
+  // 只找「这个 id」出现的位置，并且限制次数，保证循环一定结束。
+  function findAwemeOccurrences(text, awemeId) {
+    const positions = [];
+
+    for (const key of SSR_AWEME_ID_KEYS) {
+      let from = 0;
+
+      while (positions.length < MAX_SSR_BLOCKS_PER_SCRIPT) {
+        const index = text.indexOf(key, from);
+        if (index < 0) break;
+        from = index + key.length;
+
+        const head = text.slice(index, index + key.length + 80);
+        const match = new RegExp(`^${key}\\s*:\\s*"([^"]*)"`).exec(head);
+        if (!match || match[1] !== awemeId) continue;
+        positions.push(index);
+      }
+    }
+
+    return positions.sort((a, b) => a - b);
+  }
+
   function extractSsrEntriesForAwemeId(awemeId) {
     if (!awemeId) return [];
 
@@ -610,25 +650,27 @@
 
     for (const script of document.scripts) {
       const rawText = script.textContent || "";
-      if (!rawText.includes("awemeId")) continue;
+      // 先做零成本过滤：只有真的提到这个 id、且不算超大的脚本才值得解码。
+      if (!rawText.includes(awemeId)) continue;
+      if (rawText.length > MAX_SSR_SCRIPT_CHARS) continue;
 
-      const text = decodeScriptText(rawText);
-      const regex = new RegExp(`"awemeId"\\s*:\\s*"${awemeId}"`, "g");
-      let match;
+      const text = decodeScriptTextCached(script);
+      const positions = findAwemeOccurrences(text, awemeId);
+      if (!positions.length) continue;
 
-      while ((match = regex.exec(text)) !== null) {
-        const start = match.index;
-        const nextMatch = regex.exec(text);
-        const end = nextMatch ? nextMatch.index : start + 140000;
-        if (nextMatch) regex.lastIndex = nextMatch.index;
-
+      for (let i = 0; i < positions.length; i += 1) {
+        const start = positions[i];
+        const end =
+          i + 1 < positions.length
+            ? positions[i + 1]
+            : Math.min(text.length, start + MAX_SSR_BLOCK_CHARS);
         const block = text.slice(start, end);
-        const authorIndex = block.search(/"authorInfo"\\s*:/);
+        const authorIndex = block.search(/"authorInfo"\s*:/);
         if (authorIndex < 0) continue;
 
         const author = extractScriptString(block, "nickname", authorIndex);
         const authorId = extractScriptString(block, "uid", authorIndex);
-        const musicIndex = block.search(/"music"\\s*:/);
+        const musicIndex = block.search(/"music"\s*:/);
         const musicId = extractScriptString(block, "mid", musicIndex);
         const musicTitle = extractScriptString(block, "title", musicIndex);
         const desc = extractScriptString(block, "desc", authorIndex);
@@ -673,9 +715,18 @@
 
     if (data.type === "request-entry" && data.awemeId) {
       setTimeout(() => {
-        const entries =
-          ssrEntriesCache.get(data.awemeId) ||
-          extractSsrEntriesForAwemeId(data.awemeId);
+        let entries = [];
+
+        try {
+          entries =
+            ssrEntriesCache.get(data.awemeId) ||
+            extractSsrEntriesForAwemeId(data.awemeId);
+        } catch (error) {
+          // 解析失败只当没识别到，绝不把异常抛回页面主线程。
+          console.error("[douyin-bgm-filter] SSR 解析失败", error);
+          entries = [];
+        }
+
         for (const entry of entries) {
           postEntry(entry);
         }

@@ -642,8 +642,10 @@
   function renderToolbarPanel() {
     if (!toolbarPanel || !toolbarPanel.classList.contains("open")) return;
 
-    const entry = findBestEntryForActiveContainer() || {};
+    // 先尝试补数据，再取当前可用的条目：本地 SSR 解析是同步的，
+    // 这样第一次点开面板就能显示内容，不用等第二次点击。
     requestEntryForActiveContainer();
+    const entry = findBestEntryForActiveContainer() || {};
     toolbarPanel.textContent = "";
 
     const title = document.createElement("div");
@@ -1054,7 +1056,7 @@
     return bestEntry;
   }
 
-  function handleEntry(entry) {
+ function handleEntry(entry) {
   if (!entry) return;
   if (!entry.awemeId && !entry.musicId && !entry.title && !entry.author) return;
 
@@ -1062,8 +1064,14 @@
     knownEntries.set(entry.awemeId, entry);
   }
 
+  // updateToolbarPosition() 在切换到新的视频容器时会把面板收起来，
+  // 所以这里先记住面板状态，再把新数据渲染回去，避免刚拿到数据面板就没了。
+  const keepPanelOpen = Boolean(toolbarPanel?.classList.contains("open"));
+
   updateToolbarPosition();
-  if (toolbarPanel?.classList.contains("open")) {
+
+  if (keepPanelOpen) {
+    toolbarPanel?.classList.add("open");
     renderToolbarPanel();
   }
 }
@@ -1131,27 +1139,66 @@ function extractTagsFromDescription(desc) {
   return Array.from(tags).slice(0, 30);
 }
 
+const SSR_AWEME_ID_KEYS = ['"awemeId"', '"aweme_id"'];
+const MAX_LOCAL_SSR_BLOCK_CHARS = 140000;
+const MAX_LOCAL_SSR_SCRIPT_CHARS = 6000000;
+const localDecodedScriptCache = new WeakMap();
+
+function decodeLocalScriptTextCached(script) {
+  const cached = localDecodedScriptCache.get(script);
+  if (typeof cached === "string") return cached;
+
+  const decoded = decodeLocalScriptText(script.textContent || "");
+  localDecodedScriptCache.set(script, decoded);
+  return decoded;
+}
+
+// 找出这个 id 在脚本里的确切位置；找不到就返回 -1，绝不在这里做循环重扫。
+function findLocalAwemeIndex(text, awemeId) {
+  let best = -1;
+
+  for (const key of SSR_AWEME_ID_KEYS) {
+    let from = 0;
+
+    for (let guard = 0; guard < 32; guard += 1) {
+      const index = text.indexOf(key, from);
+      if (index < 0) break;
+      from = index + key.length;
+
+      const head = text.slice(index, index + key.length + 80);
+      const match = new RegExp(`^${key}\\s*:\\s*"([^"]*)"`).exec(head);
+      if (!match || match[1] !== awemeId) continue;
+      if (best < 0 || index < best) best = index;
+      break;
+    }
+  }
+
+  return best;
+}
+
 function extractLocalSsrEntry(awemeId) {
   if (!awemeId) return null;
 
   for (const script of document.scripts) {
     const rawText = script.textContent || "";
-    if (!rawText.includes("awemeId")) continue;
+    // 只有第 1 次真正做解码，之后命中同一个脚本直接用缓存。
+    if (!rawText.includes(awemeId)) continue;
+    if (rawText.length > MAX_LOCAL_SSR_SCRIPT_CHARS) continue;
 
-    const text = decodeLocalScriptText(rawText);
-    const match = text.match(
-      new RegExp(`"awemeId"\\s*:\\s*"${awemeId}"`)
+    const text = decodeLocalScriptTextCached(script);
+    const startIndex = findLocalAwemeIndex(text, awemeId);
+    if (startIndex < 0) continue;
+
+    const block = text.slice(
+      startIndex,
+      Math.min(text.length, startIndex + MAX_LOCAL_SSR_BLOCK_CHARS)
     );
-    if (!match) continue;
-
-    const startIndex = match.index;
-    const block = text.slice(startIndex, startIndex + 140000);
-    const authorIndex = block.search(/"authorInfo"\\s*:/);
+    const authorIndex = block.search(/"authorInfo"\s*:/);
     if (authorIndex < 0) continue;
 
     const author = extractLocalScriptString(block, "nickname", authorIndex);
     const authorId = extractLocalScriptString(block, "uid", authorIndex);
-    const musicIndex = block.search(/"music"\\s*:/);
+    const musicIndex = block.search(/"music"\s*:/);
     const musicId = extractLocalScriptString(block, "mid", musicIndex);
     const musicTitle = extractLocalScriptString(block, "title", musicIndex);
     const desc = extractLocalScriptString(block, "desc", authorIndex);
@@ -1184,6 +1231,11 @@ function requestEntryForActiveContainer() {
       containerId =
         new URLSearchParams(window.location.search).get("modal_id") || "";
     } catch (_) {}
+  }
+  if (!containerId) {
+    // /video/<id> 这类详情页地址栏里没有 modal_id，直接从路径里取。
+    const pathMatch = window.location.pathname.match(/\/video\/(\d{6,})/);
+    if (pathMatch) containerId = pathMatch[1];
   }
 
   if (!containerId) return;
