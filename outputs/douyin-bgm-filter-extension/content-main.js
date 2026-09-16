@@ -772,6 +772,7 @@
     if (data.type === "request-entry" && data.awemeId) {
       setTimeout(() => {
         let entries = [];
+        logEvent("info", "收到识别请求，开始查 SSR 数据", { awemeId: data.awemeId });
 
         try {
           entries =
@@ -791,6 +792,9 @@
         }
 
         if (!entries.length) {
+          logEvent("info", "SSR 里没有这个视频，页面需要靠接口数据识别", {
+            awemeId: data.awemeId
+          });
           try {
             window.postMessage(
               {
@@ -829,6 +833,17 @@
     return /\/aweme\/v1\/web\//i.test(url);
   }
 
+  // 只有这些接口里才可能带视频信息；emoji / IM / AB 参数之类的接口没必要解析。
+  const noisyApiPattern =
+    /(emoji|\/im\/|ab\/params|hot\/search|notice|settings|feedback|entrance|config|resource)/i;
+  const videoApiPattern =
+    /(aweme\/detail|aweme\/post|aweme\/related|aweme\/feed|\/feed|search\/item|history|collection|mix\/|series|module|recommend)/i;
+
+  function isVideoDataUrl(url) {
+    if (!url || noisyApiPattern.test(url)) return false;
+    return videoApiPattern.test(url);
+  }
+
   function shouldParseContentType(contentType) {
     if (!contentType) return false;
     return /json|text\/plain|javascript/i.test(contentType);
@@ -836,6 +851,8 @@
 
   function parseResponseBody(text, url) {
     if (!text || text.length > MAX_BODY_BYTES) return;
+    // 先做一次几乎零成本的检查，避免去 JSON.parse 表情包之类的大响应。
+    if (!text.includes('"aweme_id"') && !text.includes('"awemeId"')) return;
 
     let data;
     try {
@@ -846,6 +863,13 @@
 
     const entries = extractAwemeEntries(data);
     for (const entry of entries.slice(0, 500)) postEntry(entry);
+
+    if (entries.length) {
+      logEvent("info", "从接口读到视频数据", {
+        url: String(url || "").slice(0, 160),
+        entries: entries.length
+      });
+    }
   }
 
   function createFilteredResponse(response, text) {
@@ -920,7 +944,7 @@
 
         if (
           response?.ok !== false &&
-          shouldParseUrl(url) &&
+          isVideoDataUrl(url) &&
           shouldParseContentType(contentType) &&
           typeof response.clone === "function"
         ) {
@@ -989,7 +1013,25 @@
     if (xhr.readyState !== 4) return;
 
     const url = xhr.responseURL || xhr.__douyinBgmFilterUrl || "";
-    if (!isFeedUrl(url)) return;
+
+    if (!isFeedUrl(url)) {
+      // 推荐流以外的抖音接口（例如视频详情）也要读一遍：
+      // 精选页/详情页切到下一个视频时数据就是从这里来的，不读就永远「未识别」。
+      // 这里只看不改，响应本身原样交回页面。
+      if (isVideoDataUrl(url)) {
+        try {
+          const detailText = getXhrText(xhr);
+          if (detailText) {
+            parseResponseBody(detailText, url);
+          }
+        } catch (error) {
+          logEvent("error", "解析视频详情接口失败", {
+            message: String(error?.message || error)
+          });
+        }
+      }
+      return;
+    }
 
     const text = getXhrText(xhr);
     const filtered = filterFeedText(text, url);

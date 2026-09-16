@@ -65,7 +65,11 @@ node work/cdp-debug.js --chrome="C:\Program Files (x86)\Microsoft\Edge\Applicati
 - 报告与原始事件写到 `work/logs/<时间戳>/`（`report.md` + `events.json`）。
 - `--probe=ssr` 看页面里 SSR 数据的真实结构；`--probe=decode` 看百分号解码后的内容；`--probe=flow` 点击按钮并把扩展内部来回传递的消息全部录下来；`--probe=isolated` 直接在页面里跑扩展当前的解析函数。
 - `--test=popupexport` 自动打开扩展的 popup、点一次「导出诊断日志」，把下载下来的文件读回来校验（配合 `--click` 可先真实操作一遍再导出）。
+- `--walk=N` 用真实输入事件（点抖音自带的「下一个视频」箭头）连续切 N 个视频，逐步打印面板内容——专门用来复现「只有第一个视频识别得到」这类问题。
+- `--seedProfile=<已登录的配置目录>` 只把 Cookie 和解密用的 `Local State` 拷进一次性配置里，于是**既是登录态、又是干净配置**（扩展能正常加载）。
+- `--attach=<端口>` 连上已经开着的调试浏览器；`--keepOpen` 跑完不关浏览器，配合 `--profileDir` 可以做成「登录一次、长期复用」的调试环境。
 - **Chrome 153 起官方版已忽略 `--load-extension`**（日志里会写 `--disable-extensions-except is not allowed in Google Chrome`），所以默认用 Edge；其它 Chromium 用 `--chrome=` 指定。
+- 想长期保留登录态时注意：**直接复用旧配置目录会让 Edge 拒绝加载这个未打包扩展**（日志里是「无法安装该应用或扩展」），所以用 `--seedProfile` 继承登录更稳。
 
 ## 设计原则
 

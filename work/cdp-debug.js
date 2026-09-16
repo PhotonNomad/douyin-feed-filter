@@ -34,7 +34,13 @@ function parseArgs(argv) {
     keepProfile: false,
     outDir: "",
     probe: "",
-    test: ""
+    test: "",
+    walk: 0,
+    profileDir: "",
+    visible: false,
+    keepOpen: false,
+    attach: 0,
+    seedProfile: ""
   };
   for (const arg of argv) {
     const m = /^--([a-zA-Z]+)(?:=(.*))?$/.exec(arg);
@@ -43,6 +49,8 @@ function parseArgs(argv) {
     if (key === "click") opts.click = true;
     else if (key === "headless") opts.headless = true;
     else if (key === "keepProfile") opts.keepProfile = true;
+    else if (key === "visible") opts.visible = true;
+    else if (key === "keepOpen") opts.keepOpen = true;
     else if (key in opts) opts[key] = /^\d+$/.test(value || "") ? Number(value) : value;
   }
   return opts;
@@ -77,7 +85,7 @@ class Cdp {
     });
   }
 
-  send(method, params = {}, sessionId) {
+  send(method, params = {}, sessionId, timeoutMs = 30000) {
     const id = this.nextId++;
     const payload = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
@@ -89,7 +97,7 @@ class Cdp {
           this.pending.delete(id);
           reject(new Error(`CDP 超时: ${method}`));
         }
-      }, 30000);
+      }, timeoutMs);
     });
   }
 
@@ -119,7 +127,8 @@ async function findPageTarget(port) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`);
       const list = await res.json();
-      const page = list.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+      const pages = list.filter((t) => t.type === "page" && t.webSocketDebuggerUrl);
+      const page = pages.find((t) => /douyin\.com/.test(t.url || "")) || pages[0];
       if (page) return page;
     } catch {
       /* 重试 */
@@ -295,6 +304,102 @@ const PROBES = {
   })()`,
 
   // 点击按钮后，把扩展自己在 window 上来回传的消息全录下来。
+  // 页面内切换视频的尝试：注意抖音会忽略脚本合成的按键，所以这个探针通常切不动，
+  // 真正的切换用 Node 侧的 --walk（走 CDP 的真输入事件）。
+  // 看弹窗页里作者 / 标签 / 音乐这些信息在 DOM 上的真实结构，供兜底识别使用。
+  dom: `(() => {
+    const tidy = (text) => String(text || "").replace(/[\\n\\t ]+/g, " ").trim();
+    const pick = (selector) =>
+      Array.from(document.querySelectorAll(selector)).slice(0, 8).map((el) => ({
+        tag: el.tagName,
+        text: tidy(el.innerText).slice(0, 90),
+        href: el.getAttribute("href") || "",
+        dataE2e: el.getAttribute("data-e2e") || ""
+      }));
+
+    return {
+      dataE2eAll: Array.from(document.querySelectorAll("[data-e2e]"))
+        .map((el) => el.getAttribute("data-e2e"))
+        .filter((name, index, list) => name && list.indexOf(name) === index)
+        .slice(0, 60),
+      authorLinks: pick('a[href*="/user/"]'),
+      musicLinks: pick('a[href*="/music/"]'),
+      h1: pick("h1"),
+      descCandidates: pick('[data-e2e="video-desc"], [class*="desc"], [class*="Desc"]'),
+      musicCandidates: pick('[class*="music"], [class*="Music"]'),
+      authorCandidates: pick('[class*="author"], [class*="Author"], [class*="userName"], [class*="nickname"]')
+    };
+  })()`,
+
+  walksynth: `(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const tidy = (text) => String(text || "").replace(/[\\n\\t ]+/g, " ").trim();
+
+    const currentVideo = () => {
+      let best = null;
+      let bestArea = 0;
+      for (const el of document.querySelectorAll("[data-e2e-vid]")) {
+        const rect = el.getBoundingClientRect();
+        const visible =
+          Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0)) * rect.width;
+        if (visible > bestArea) {
+          bestArea = visible;
+          best = el;
+        }
+      }
+      return {
+        id: best ? best.getAttribute("data-e2e-vid") : null,
+        visibleArea: Math.round(bestArea)
+      };
+    };
+
+    const snapshot = (label) => {
+      const panel = document.querySelector(".douyin-bgm-filter-panel");
+      const toolbar = document.querySelector(".douyin-bgm-filter-toolbar");
+      const rect = toolbar ? toolbar.getBoundingClientRect() : null;
+      return {
+        label,
+        modalId: new URLSearchParams(location.search).get("modal_id"),
+        url: location.pathname + location.search,
+        video: currentVideo(),
+        toolbarDisplay: toolbar ? getComputedStyle(toolbar).display : null,
+        toolbarPos: rect ? [Math.round(rect.x), Math.round(rect.y)] : null,
+        panelText: panel ? tidy(panel.innerText).slice(0, 220) : null
+      };
+    };
+
+    const advance = async () => {
+      // 抖音网页版切下一个视频：优先键盘，再补一次滚轮。
+      for (const target of [document, document.body, window]) {
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", keyCode: 40, which: 40, bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", code: "ArrowDown", keyCode: 40, which: 40, bubbles: true }));
+      }
+
+      const host = document.querySelector("[data-e2e-vid]") || document.body;
+      host.dispatchEvent(new WheelEvent("wheel", { deltaY: 900, bubbles: true, cancelable: true }));
+      await sleep(4000);
+    };
+
+    const steps = [snapshot("初始")];
+    for (let round = 0; round < 3; round += 1) {
+      const button = document.querySelector(".douyin-bgm-filter-button");
+      if (button) {
+        button.click();
+        await sleep(2000);
+        steps.push(snapshot("第 " + (round + 1) + " 次点击后面板"));
+        button.click();
+        await sleep(300);
+      } else {
+        steps.push({ label: "第 " + (round + 1) + " 次点击：没有按钮" });
+      }
+
+      await advance();
+      steps.push(snapshot("切到下一个视频后"));
+    }
+
+    return { steps, videos: document.querySelectorAll("[data-e2e-vid]").length };
+  })()`,
+
   flow: `(async () => {
     const traffic = [];
     window.addEventListener("message", (event) => {
@@ -371,6 +476,189 @@ async function openBrowserCdp(port) {
 }
 
 // 真正打开扩展的 popup 页面、点一次「导出诊断日志」，再把下载下来的文件读回来。
+// 用 CDP 的真输入事件在精选/推荐里连续切几个视频，看第 2 个以后还能不能识别。
+const WALK_SNAPSHOT = `(() => {
+  let best = null;
+  let bestArea = 0;
+  for (const el of document.querySelectorAll("[data-e2e-vid]")) {
+    const rect = el.getBoundingClientRect();
+    const visible =
+      Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0)) * rect.width;
+    if (visible > bestArea) {
+      bestArea = visible;
+      best = { el, rect };
+    }
+  }
+
+  const panel = document.querySelector(".douyin-bgm-filter-panel");
+  const toolbar = document.querySelector(".douyin-bgm-filter-toolbar");
+  const toolbarRect = toolbar ? toolbar.getBoundingClientRect() : null;
+
+  return {
+    modalId: new URLSearchParams(location.search).get("modal_id"),
+    url: location.pathname + location.search,
+    videoId: best ? best.el.getAttribute("data-e2e-vid") : null,
+    videoCenter: best
+      ? [Math.round(best.rect.x + best.rect.width / 2), Math.round(best.rect.y + best.rect.height / 2)]
+      : [Math.round(innerWidth / 2), Math.round(innerHeight / 2)],
+    toolbarDisplay: toolbar ? getComputedStyle(toolbar).display : null,
+    panelText: panel
+      ? String(panel.innerText || "").replace(/[\\n\\t ]+/g, " ").trim().slice(0, 220)
+      : null
+  };
+})()`;
+
+async function runWalk({ cdp, rounds, outDir }) {
+  const snapshot = () => evaluate(cdp, WALK_SNAPSHOT, undefined, { timeoutMs: 20000 });
+  const clickButton = () =>
+    evaluate(
+      cdp,
+      `(() => {
+        const button = document.querySelector(".douyin-bgm-filter-button");
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`,
+      undefined,
+      { timeoutMs: 20000 }
+    );
+
+  const steps = [{ label: "初始", ...(await snapshot()) }];
+
+  for (let round = 0; round < rounds; round += 1) {
+    const clicked = await clickButton();
+    await sleep(2200);
+    steps.push({ label: `第 ${round + 1} 次点击后`, clicked, ...(await snapshot()) });
+
+    await clickButton();
+    await sleep(300);
+
+    const before = await snapshot();
+    const [x, y] = before.videoCenter || [600, 400];
+
+    // 用真实输入事件切换视频：优先点抖音自己的「下一个」箭头，再退回滚轮/方向键。
+    const inputErrors = [];
+
+    // 登录弹窗会挡住点击，先把能关的关掉。
+    await evaluate(
+      cdp,
+      `(() => {
+        const selectors = [
+          '[aria-label="关闭"]',
+          '[data-e2e="close"]',
+          '[class*="close"]',
+          '[class*="Close"]'
+        ];
+        const clicked = [];
+        for (const selector of selectors) {
+          for (const el of document.querySelectorAll(selector)) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && rect.width < 80) {
+              el.click();
+              clicked.push(selector);
+              break;
+            }
+          }
+        }
+        return clicked;
+      })()`,
+      undefined,
+      { timeoutMs: 15000 }
+    );
+
+    // 先直接触发一次箭头点击（有些按钮是普通 DOM 监听，合成点击也认）。
+    await evaluate(
+      cdp,
+      `(() => {
+        const arrow = document.querySelector('[data-e2e="video-switch-next-arrow"]');
+        if (arrow) arrow.click();
+        const list = document.querySelector('[data-e2e="slideList"]');
+        if (list) {
+          list.scrollTop = list.scrollTop + list.clientHeight;
+          list.dispatchEvent(new Event("scroll", { bubbles: true }));
+        }
+        return true;
+      })()`,
+      undefined,
+      { timeoutMs: 15000 }
+    );
+    await sleep(2500);
+
+    const arrow = await evaluate(
+      cdp,
+      `(() => {
+        const el = document.querySelector('[data-e2e="video-switch-next-arrow"]');
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+      })()`,
+      undefined,
+      { timeoutMs: 15000 }
+    );
+
+    if (arrow && !arrow.__error) {
+      try {
+        await cdp.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseMoved", x: arrow.x, y: arrow.y, pointerType: "mouse" },
+          undefined,
+          6000
+        );
+        await cdp.send(
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x: arrow.x, y: arrow.y, button: "left", clickCount: 1, pointerType: "mouse" },
+          undefined,
+          6000
+        );
+        await cdp.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x: arrow.x, y: arrow.y, button: "left", clickCount: 1, pointerType: "mouse" },
+          undefined,
+          6000
+        );
+      } catch (error) {
+        inputErrors.push(String(error.message || error));
+      }
+    } else {
+      inputErrors.push("没有找到 video-switch-next-arrow");
+    }
+
+    const keyEvent = (type) => ({
+      type,
+      windowsVirtualKeyCode: 40,
+      nativeVirtualKeyCode: 40,
+      code: "ArrowDown",
+      key: "ArrowDown"
+    });
+
+    try {
+      await cdp.send("Input.dispatchKeyEvent", keyEvent("rawKeyDown"), undefined, 6000);
+      await cdp.send("Input.dispatchKeyEvent", keyEvent("keyUp"), undefined, 6000);
+      await sleep(800);
+      await cdp.send(
+        "Input.dispatchMouseEvent",
+        { type: "mouseWheel", x, y, deltaX: 0, deltaY: 800, pointerType: "mouse" },
+        undefined,
+        6000
+      );
+    } catch (error) {
+      inputErrors.push(String(error.message || error));
+    }
+    await sleep(3500);
+
+    steps.push({
+      label: `切到下一个视频后（第 ${round + 1} 次）`,
+      inputErrors,
+      ...(await snapshot())
+    });
+  }
+
+  const result = { steps };
+  fs.writeFileSync(path.join(outDir, "walk.json"), JSON.stringify(result, null, 2), "utf8");
+  return result;
+}
+
 async function runPopupExportTest({ port, extId, outDir }) {
   const browser = await openBrowserCdp(port);
   const downloadDir = path.join(outDir, "downloads");
@@ -502,12 +790,13 @@ ${parts}
 
 let opts0 = { ext: DEFAULT_EXT };
 
-async function evaluate(cdp, expression, sessionId, { awaitPromise = false } = {}) {
+async function evaluate(cdp, expression, sessionId, { awaitPromise = false, timeoutMs = 30000 } = {}) {
   try {
     const res = await cdp.send(
       "Runtime.evaluate",
       { expression, returnByValue: true, awaitPromise, userGesture: true },
-      sessionId
+      sessionId,
+      timeoutMs
     );
     if (res.exceptionDetails) {
       return { __error: res.exceptionDetails.text || "evaluate 抛错" };
@@ -535,6 +824,8 @@ function formatEventLine(ev) {
       return `[${time}] HTTP ${ev.status} ${ev.url}`;
     case "navigation":
       return `[${time}] 导航 → ${ev.url}`;
+    case "api":
+      return `[${time}] 接口 ${ev.method} ${ev.url}`;
     default:
       return `[${time}] ${ev.kind} ${JSON.stringify(ev).slice(0, 300)}`;
   }
@@ -556,7 +847,36 @@ async function main() {
   const outDir = opts.outDir || path.join(__dirname, "logs", stamp);
   fs.mkdirSync(outDir, { recursive: true });
 
-  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "douyin-cdp-"));
+  // 固定配置目录用来「登录一次、长期复用」；没指定就用一次性临时目录。
+  const profileDir = opts.profileDir
+    ? path.resolve(opts.profileDir)
+    : fs.mkdtempSync(path.join(os.tmpdir(), "douyin-cdp-"));
+  if (opts.profileDir) fs.mkdirSync(profileDir, { recursive: true });
+
+  // 从一个已有的配置里「继承登录状态」：只拷 Cookie 和解密用的 Local State，
+  // 其它一律不要，这样新配置依然干净、扩展能正常加载。
+  if (opts.seedProfile) {
+    const seed = path.resolve(opts.seedProfile);
+    const inherited = [
+      "Local State",
+      path.join("Default", "Network", "Cookies"),
+      path.join("Default", "Preferences")
+    ];
+
+    for (const relative of inherited) {
+      const from = path.join(seed, relative);
+      if (!fs.existsSync(from)) {
+        console.log(`没有找到可继承的文件：${relative}`);
+        continue;
+      }
+
+      const to = path.join(profileDir, relative);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+      console.log(`继承登录状态：${relative}`);
+    }
+  }
+
   const chromeArgs = [
     `--user-data-dir=${profileDir}`,
     `--remote-debugging-port=${opts.port}`,
@@ -564,16 +884,33 @@ async function main() {
     `--disable-extensions-except=${opts.ext}`,
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-features=Translate,OptimizationHints,MediaRouter",
+    "--disable-features=Translate,OptimizationHints,MediaRouter,CalculateNativeWinOcclusion",
+    // 窗口移到屏幕外时 Chrome 会把页面当成被遮挡/后台页面，输入事件和定时器会被节流，
+    // 这里显式关掉，保证自动操作和长任务测量都准确。
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
     "--window-size=1360,900",
-    "--window-position=-32000,-32000",
     "--lang=zh-CN",
     "about:blank"
   ];
+  if (!opts.visible) chromeArgs.push("--window-position=-32000,-32000");
   if (opts.headless) chromeArgs.unshift("--headless=new");
 
-  console.log(`启动 Chrome（端口 ${opts.port}，配置目录 ${profileDir}）…`);
-  const chrome = spawn(opts.chrome, chromeArgs, { stdio: "ignore", detached: false });
+  let chrome = null;
+  if (opts.attach) {
+    opts.port = Number(opts.attach);
+    console.log(`连接到已经运行的调试浏览器（端口 ${opts.port}）…`);
+    await waitForEndpoint(opts.port);
+  } else {
+    console.log(`启动浏览器（端口 ${opts.port}，配置目录 ${profileDir}）…`);
+    // keepOpen 时让浏览器脱离父进程，脚本退出后它继续留着给用户登录 / 后续 attach 使用。
+    chrome = spawn(opts.chrome, chromeArgs, {
+      stdio: "ignore",
+      detached: Boolean(opts.keepOpen)
+    });
+    if (opts.keepOpen) chrome.unref();
+  }
 
   const events = [];
   const contexts = new Map();
@@ -646,6 +983,11 @@ async function main() {
         record({ kind: "responseError", status: p.response.status, url: p.response.url.slice(0, 200) });
       }
     });
+    cdp.on("Network.requestWillBeSent", (p) => {
+      const url = p.request?.url || "";
+      if (!/\/aweme\/v1\/web\//i.test(url)) return;
+      record({ kind: "api", method: p.request.method, url: url.slice(0, 240) });
+    });
     cdp.on("Page.frameNavigated", (p) => {
       if (!p.frame.parentId) record({ kind: "navigation", url: p.frame.url });
     });
@@ -671,10 +1013,19 @@ async function main() {
         exitCode = 2;
         return;
       }
-      const probeResult = await evaluate(cdp, probe, undefined, { awaitPromise: true });
+      const probeResult = await evaluate(cdp, probe, undefined, {
+        awaitPromise: true,
+        timeoutMs: 180000
+      });
       fs.writeFileSync(path.join(outDir, "probe.json"), JSON.stringify(probeResult, null, 2), "utf8");
       console.log(`探针 ${opts.probe} 结果：\n${JSON.stringify(probeResult, null, 2)}`);
-      return;
+      if (!opts.test) return;
+    }
+
+    if (opts.walk) {
+      const walkResult = await runWalk({ cdp, rounds: opts.walk, outDir });
+      console.log(`连续切换视频结果：\n${JSON.stringify(walkResult, null, 2)}`);
+      if (!opts.test) return;
     }
 
     if (opts.test === "popupexport") {
@@ -682,7 +1033,7 @@ async function main() {
       if (!extId) throw new Error("没有找到扩展 ID（隔离世界上下文里没有 chrome-extension 来源）");
 
       // 先真在页面上操作一遍，日志里才有识别/过滤记录可以导出。
-      if (opts.click) {
+      if (opts.click && !opts.probe) {
         await evaluate(
           cdp,
           `(() => {
@@ -692,7 +1043,7 @@ async function main() {
             return true;
           })()`
         );
-        await sleep(4000);
+      await sleep(3200);
       }
 
       const result = await runPopupExportTest({ port: opts.port, extId, outDir });
@@ -742,18 +1093,23 @@ async function main() {
     exitCode = 1;
     console.error("调试过程出错：", err.message);
   } finally {
-    try {
-      if (cdp) await cdp.send("Browser.close");
-    } catch {
-      /* 忽略 */
+    if (opts.keepOpen) {
+      console.log("保留了调试浏览器（--keepOpen），下次可以直接 --attach 连上来。");
+    } else {
+      try {
+        if (cdp && !opts.attach) await cdp.send("Browser.close");
+      } catch {
+        /* 忽略 */
+      }
+      await sleep(600);
+      try {
+        chrome?.kill();
+      } catch {
+        /* 忽略 */
+      }
     }
-    await sleep(600);
-    try {
-      chrome.kill();
-    } catch {
-      /* 忽略 */
-    }
-    if (!opts.keepProfile) {
+
+    if (!opts.keepProfile && !opts.profileDir && !opts.keepOpen) {
       try {
         fs.rmSync(profileDir, { recursive: true, force: true });
       } catch {

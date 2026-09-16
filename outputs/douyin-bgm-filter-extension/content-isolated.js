@@ -43,6 +43,7 @@
   let settings = structuredClone(DEFAULT_SETTINGS);
   const knownEntries = new Map();
   const requestedEntries = new Set();
+  let lastRequestedAwemeId = "";
 
   // ---- 诊断日志 -----------------------------------------------------------
   // 只保存在浏览器本地。环形缓冲，最多 300 条，写入做了节流，
@@ -1214,15 +1215,20 @@
     knownEntries.set(entry.awemeId, entry);
   }
 
-  logEvent("info", "识别到视频数据", {
-    awemeId: entry.awemeId,
-    author: entry.author,
-    authorId: entry.authorId,
-    musicId: entry.musicId,
-    title: entry.title,
-    tags: (entry.tags || []).length,
-    source: entry.source
-  });
+  // 预加载的相邻视频也会走到这里，只有「用户当前看的这个」才值得记一条，
+  // 否则日志会被几十条无关记录刷掉。
+  const isCurrentVideo = Boolean(lastRequestedAwemeId) && entry.awemeId === lastRequestedAwemeId;
+  if (isCurrentVideo) {
+    logEvent("info", "识别到当前视频的数据", {
+      awemeId: entry.awemeId,
+      author: entry.author,
+      authorId: entry.authorId,
+      musicId: entry.musicId,
+      title: entry.title,
+      tags: (entry.tags || []).length,
+      source: entry.source
+    });
+  }
 
   // updateToolbarPosition() 在切换到新的视频容器时会把面板收起来，
   // 所以这里先记住面板状态，再把新数据渲染回去，避免刚拿到数据面板就没了。
@@ -1426,6 +1432,7 @@ function requestEntryForActiveContainer() {
   if (knownEntries.has(containerId) || requestedEntries.has(containerId)) return;
 
   requestedEntries.add(containerId);
+  lastRequestedAwemeId = containerId;
   logEvent("info", "开始识别当前视频", { awemeId: containerId, from: idSource });
 
   const ssrStarted = Date.now();

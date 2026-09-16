@@ -11,7 +11,7 @@
 项目：Chrome MV3 扩展「抖音视频屏蔽」，在抖音网页版推荐流的数据层按 BGM / 博主 / 标签过滤视频。
 仓库：C:\Users\issues\Documents\Codex\2026-09-06\wo
 源码：outputs\douyin-bgm-filter-extension（Chrome 直接加载这个目录，不要移动）
-当前版本：0.5.21（manifest.json）
+当前版本：0.5.22（manifest.json）
 背景文档：docs/handoff.md、CHANGELOG.md、README.md
 
 架构：
@@ -29,7 +29,7 @@
 5) 黑名单只存本地，不上传。
 
 待办（优先级从高到低）：
-1) 真机回归 0.5.21：精选页点击屏蔽按钮应该能直接识别出博主/标签/BGM，且不再卡死。
+1) 真机回归 0.5.22：精选页连续切视频，第二个之后也要能识别出博主/标签/BGM。
 2) 屏蔽按钮定位：Y 轴在视频画面顶部，X 轴与点赞图标中心对齐，需真机回归。
 3) 保存规则时偶发的 storage 上下文失效报错是否彻底消失。
 4) 需要现场时：让用户点扩展弹窗里的「导出诊断日志」，把 txt 发过来（不用再翻控制台）。
@@ -156,6 +156,7 @@ PC 网页版抖音的推荐流过滤扩展：用抖音接口返回的官方字�
 | 0.5.19 | 精选页 URL 编码数据解析、识别失败允许重试、收窄解析范围减少卡顿、存储保护 |
 | 0.5.20 | 修掉精选页点击后主线程死循环（页面卡死）、修掉 `\\s` 转义写错导致的作者/BGM 解析失败、第一次点击即可显示识别结果、`/video/<id>` 支持从路径取 id |
 | 0.5.21 | 新增诊断日志与「导出诊断日志」入口（本地保存、可导出给开发者），数据层日志通过消息转发到隔离世界统一保存 |
+| 0.5.22 | 修复「第二个视频之后识别不到」：XHR 路径原来只处理推荐流地址，详情类接口的响应被跳过；现在也会读取（只读不改）并收窄到可能含视频数据的接口，同时给诊断日志降噪 |
 
 详细条目见 `CHANGELOG.md`。
 
@@ -236,6 +237,8 @@ node work/cdp-debug.js --chrome="C:\Program Files (x86)\Microsoft\Edge\Applicati
 
 - **Chrome 153 起官方版忽略 `--load-extension`**，日志里会写 `--disable-extensions-except is not allowed in Google Chrome`，扩展根本不会加载（页面里没有隔离世界、没有注入样式）。用 Edge 或 Chrome for Testing 才加载得起来。
 - 未登录的临时配置打开 `https://www.douyin.com/?recommend=1` 会被重定向到 `/jingxuan`，并出现登录弹窗。所以推荐流的日常路径要靠用户真机验证，自动环境主要用于精选页 / 详情页。
+- **直接复用旧配置目录会让 Edge 拒绝加载未打包扩展**（日志：`Extension error: 无法安装该应用或扩展`）。要么每次用全新临时配置，要么用 `--seedProfile=<已登录配置>`：只拷 `Local State` + `Default/Network/Cookies`，既保住登录态、又让扩展能正常加载。
+- 精选页切换视频要用真实输入（`--walk=N` 会点抖音自己的 `video-switch-next-arrow`）；脚本里合成的 `KeyboardEvent` / `WheelEvent` 会被抖音忽略，切不动。
 
 - 重新加载扩展：`chrome://extensions/` → 该扩展 → 刷新按钮。
 - 重新加载扩展后必须**完全刷新**抖音页面，否则旧 content script 会报存储上下文失效。
