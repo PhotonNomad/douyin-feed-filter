@@ -28,7 +28,7 @@ global.window = window;
 global.XMLHttpRequest = XMLHttpRequest;
 global.Event = class Event {};
 global.ProgressEvent = class ProgressEvent {};
-vm.runInThisContext(fs.readFileSync("outputs/douyin-bgm-filter-extension/content-main.js", "utf8"));
+vm.runInThisContext(fs.readFileSync("extension/content-main.js", "utf8"));
 listeners[0]({ source: window, origin, data: { source: "douyin-bgm-filter/isolated", type: "settings", enabled: true, blocked: { "author:bad": {} } } });
 (async () => {
   const response = await window.fetch(`${origin}/aweme/v1/web/tab/feed/?cursor=0`);

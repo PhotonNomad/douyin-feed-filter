@@ -46,7 +46,7 @@ global.XMLHttpRequest = XMLHttpRequest;
 global.Event = class Event {};
 global.ProgressEvent = class ProgressEvent {};
 
-const code = fs.readFileSync("outputs/douyin-bgm-filter-extension/content-main.js", "utf8");
+const code = fs.readFileSync("extension/content-main.js", "utf8");
 vm.runInThisContext(code);
 
 listeners[0]({

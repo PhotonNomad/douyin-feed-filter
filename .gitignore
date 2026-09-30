@@ -15,7 +15,7 @@ node_modules/
 tmp/
 
 # 自动调试脚本产生的运行记录
-work/logs/
+outputs/debug/
 
 # 固定调试浏览器配置（含登录态，绝不入库）
-work/browser-profile/
+outputs/browser-profile/

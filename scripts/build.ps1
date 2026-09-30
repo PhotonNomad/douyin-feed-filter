@@ -3,11 +3,10 @@
 
 用法：
   powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-  powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Source outputs\douyin-video-block-noui-extension -Output outputs\noui.zip
 #>
 param(
-  [string]$Source = (Join-Path $PSScriptRoot "..\outputs\douyin-bgm-filter-extension"),
-  [string]$Output = (Join-Path $PSScriptRoot "..\outputs\douyin-bgm-filter-extension.zip")
+  [string]$Source = (Join-Path $PSScriptRoot "..\extension"),
+  [string]$Output = (Join-Path $PSScriptRoot "..\outputs\douyin-feed-filter.zip")
 )
 
 $ErrorActionPreference = "Stop"

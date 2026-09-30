@@ -4,12 +4,12 @@
  * 特点：不依赖任何 npm 包，只用 Node 内置的 fetch + WebSocket（Node 22+）。
  *
  * 用法：
- *   node work/cdp-debug.js --url="https://www.douyin.com/jingxuan?modal_id=..." --click
- *   node work/cdp-debug.js --url="https://www.douyin.com/?recommend=1" --seconds=25
+ *   node scripts/debug.js --url="https://www.douyin.com/jingxuan?modal_id=..." --click
+ *   node scripts/debug.js --url="https://www.douyin.com/?recommend=1" --seconds=25
  *
  * 产物：
- *   work/logs/<时间戳>/report.md   人读的汇总（报错、卡顿、按钮/面板状态）
- *   work/logs/<时间戳>/events.json 原始事件（控制台、异常、长任务、失败请求）
+ *   outputs/debug/<时间戳>/report.md   人读的汇总（报错、卡顿、按钮/面板状态）
+ *   outputs/debug/<时间戳>/events.json 原始事件（控制台、异常、长任务、失败请求）
  */
 
 const { spawn } = require("child_process");
@@ -17,9 +17,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const DEFAULT_CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const DEFAULT_EXT =
-  "C:\\Users\\issues\\Documents\\Codex\\2026-09-06\\wo\\outputs\\douyin-bgm-filter-extension";
+const DEFAULT_CHROME = process.env.CHROME_PATH || (process.platform === "win32" ? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" : process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "/usr/bin/chromium");
+const DEFAULT_EXT = path.resolve(__dirname, "..", "extension");
 
 function parseArgs(argv) {
   const opts = {
@@ -1067,7 +1066,7 @@ async function main() {
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const outDir = opts.outDir || path.join(__dirname, "logs", stamp);
+  const outDir = opts.outDir || path.join(__dirname, "..", "outputs", "debug", stamp);
   fs.mkdirSync(outDir, { recursive: true });
 
   // 固定配置目录用来「登录一次、长期复用」；没指定就用一次性临时目录。

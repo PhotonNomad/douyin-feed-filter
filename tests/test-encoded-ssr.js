@@ -20,7 +20,7 @@ global.window = {
   fetch: async () => { throw new Error("not used"); }
 };
 global.XMLHttpRequest = XHR;
-vm.runInThisContext(fs.readFileSync("outputs/douyin-bgm-filter-extension/content-main.js", "utf8"));
+vm.runInThisContext(fs.readFileSync("extension/content-main.js", "utf8"));
 const settingsListener = listeners.find(fn => true);
 settingsListener({ source: window, origin: window.location.origin, data: { source: "douyin-bgm-filter/isolated", type: "settings", enabled: true, blocked: {} } });
 settingsListener({ source: window, origin: window.location.origin, data: { source: "douyin-bgm-filter/isolated", type: "request-entry", awemeId: id } });

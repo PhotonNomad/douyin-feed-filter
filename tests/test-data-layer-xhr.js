@@ -45,7 +45,7 @@ global.window = window;
 global.XMLHttpRequest = XHR;
 global.Event = FakeEvent;
 global.ProgressEvent = FakeEvent;
-vm.runInThisContext(fs.readFileSync("outputs/douyin-bgm-filter-extension/content-main.js", "utf8"));
+vm.runInThisContext(fs.readFileSync("extension/content-main.js", "utf8"));
 listeners[0]({ source: window, origin, data: { source: "douyin-bgm-filter/isolated", type: "settings", enabled: true, blocked: { "author:bad": {} } } });
 
 const xhr = new XHR();

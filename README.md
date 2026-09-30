@@ -1,91 +1,51 @@
 # 抖音视频屏蔽
 
-抖音网页版（PC）推荐流过滤扩展。按 **BGM / 博主 / 标签** 屏蔽内容，过滤发生在数据层：
-命中规则的视频在抖音 feed 接口返回给页面之前就被移除，页面体验接近「这个视频没有出现过」。
+Chrome / Edge 扩展，按 **BGM、博主和标签** 过滤抖音网页版推荐内容。命中规则的视频在网络响应交给页面之前被移除；规则、屏蔽记录和诊断日志均保存在浏览器本地。
 
-当前版本：**0.5.19**（Chrome MV3，需要 Chrome / Edge 111+）
+当前版本 **0.5.25**，需要 Chrome / Edge 111+。仅支持 PC 网页版，音乐识别依赖抖音返回的官方字段，不包含音频指纹识别；直播内容不参与过滤。
 
-## 目录结构
+## 安装与使用
+
+1. 打开 `chrome://extensions/` 或 `edge://extensions/`，开启开发者模式。
+2. 点击「加载已解压的扩展程序」，选择仓库中的 `extension/`。使用发布 ZIP 时，先解压再选择解压目录。
+3. 打开 [抖音网页版](https://www.douyin.com/)，点击视频右侧的屏蔽按钮，选择博主、标签或 BGM 并保存。
+4. 点击浏览器工具栏的扩展图标，可手动添加或取消规则、查看屏蔽记录、调整按钮图片和大小，以及导出诊断日志。
+
+保存规则时会发送一次抖音的「不感兴趣」快捷键反馈。过滤发生在数据层，不自动切换视频、不隐藏视频卡片。抖音接口或页面结构变化可能影响功能。
+
+更新源码后，在扩展管理页重新加载扩展，再完全刷新抖音页面。此前加载 `outputs/douyin-bgm-filter-extension/` 的用户需重新选择 `extension/`。
+
+## 项目结构
 
 ```text
-wo/
-├── outputs/
-│   ├── douyin-bgm-filter-extension/        # 主扩展源码（Chrome 加载的就是这个目录）
-│   ├── douyin-video-block-noui-extension/  # 诊断版：只做数据层过滤，不显示页面按钮
-│   ├── douyin-bgm-filter-extension.zip     # 打包产物（由 scripts/build.ps1 生成，不入库）
-│   └── douyin-video-block-noui-extension.zip
-├── work/                                   # 开发过程中的临时脚本（打补丁 / 抓数据 / 验证用）
-├── docs/
-│   └── handoff.md                          # 对话压缩 + 项目交接（换会话前先读这个）
-├── scripts/
-│   └── build.ps1                           # 打包扩成为可分发 zip
-├── CHANGELOG.md
-└── README.md
+extension/       可直接加载的正式扩展
+tests/          数据层过滤和 SSR 解析回归测试
+scripts/         打包与浏览器调试工具
+outputs/         生成的发布 ZIP 与调试报告（不入库）
+CHANGELOG.md     版本记录
 ```
 
-> 主扩展目录路径被 Chrome 的「加载已解压的扩展程序」直接引用，**移动或改名会导致已加载的扩展失效**，需要重新加载。所以源码一直留在 `outputs/` 下。
+## 开发与打包
 
-## 安装（开发者模式）
+无需安装 npm 依赖。使用 Node.js 22+ 运行测试，使用 Python 3 打包：
 
-1. 打开 `chrome://extensions/`（Edge：`edge://extensions/`）。
-2. 打开右上角「开发者模式」。
-3. 点「加载已解压的扩展程序」，选择 `outputs/douyin-bgm-filter-extension`。
-4. 打开 <https://www.douyin.com/>，点工具栏扩展图标管理屏蔽规则。
+```sh
+node --test tests/*.js
+python3 scripts/build.py
+```
 
-改完代码后：在扩展管理页点该扩展的「刷新」按钮，然后 **完全刷新** 抖音页面（旧页面里的 content script 连着失效的扩展上下文）。
-
-## 打包
+默认生成 `outputs/douyin-feed-filter.zip`，ZIP 根目录包含 `manifest.json`。Windows 也可使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
-默认输出 `outputs/douyin-bgm-filter-extension.zip`，也可用 `-Source` / `-Output` 指定其它扩展或输出路径。
+需要浏览器调试时，使用支持加载未打包扩展的浏览器，并明确指定可执行文件：
 
-## 自己复现问题并抓错误（自动调试）
-
-### 给使用者：导出诊断日志
-
-扩展弹窗底部有「诊断」区：
-
-- **导出诊断日志**：下载一个 txt，里面是扩展自己的运行记录（启动、识别到的博主/标签/BGM、过滤了多少条、报错信息、当时页面地址）。
-- **复制 / 清空**：把内容复制到剪贴板，或清掉本地记录。
-
-日志只保存在本机、不上传。遇到问题时导出这份文件发给开发者即可，不需要自己去翻控制台。
-
-### 给开发：自动复现环境
-
-`work/cdp-debug.js` 用 Chrome DevTools Protocol 驱动一个**独立浏览器**（独立临时配置目录，和日常浏览互不影响）加载本扩展、打开指定页面，并生成一份报告：控制台报错、未捕获异常、失败请求、长任务（卡顿毫秒数）、按钮与面板状态、面板实际内容。
-
-```powershell
-node work/cdp-debug.js --chrome="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
-  --url="https://www.douyin.com/jingxuan?modal_id=7684253090765180179" --seconds=15 --click
+```sh
+node scripts/debug.js --chrome=/path/to/browser --url=https://www.douyin.com/ --click
 ```
 
-- 报告与原始事件写到 `work/logs/<时间戳>/`（`report.md` + `events.json`）。
-- `--probe=ssr` 看页面里 SSR 数据的真实结构；`--probe=decode` 看百分号解码后的内容；`--probe=flow` 点击按钮并把扩展内部来回传递的消息全部录下来；`--probe=isolated` 直接在页面里跑扩展当前的解析函数。
-- `--test=popupexport` 自动打开扩展的 popup、点一次「导出诊断日志」，把下载下来的文件读回来校验（配合 `--click` 可先真实操作一遍再导出）。
-- `--walk=N` 用真实输入事件（点抖音自带的「下一个视频」箭头）连续切 N 个视频，逐步打印面板内容——专门用来复现「只有第一个视频识别得到」这类问题。
-- `--windowSize=1360,900` 指定调试窗口尺寸（用来验证不同宽度下的布局与对齐）。
-- `--seedProfile=<已登录的配置目录>` 只把 Cookie 和解密用的 `Local State` 拷进一次性配置里，于是**既是登录态、又是干净配置**（扩展能正常加载）。
-- `--attach=<端口>` 连上已经开着的调试浏览器；`--keepOpen` 跑完不关浏览器，配合 `--profileDir` 可以做成「登录一次、长期复用」的调试环境。
-- **Chrome 153 起官方版已忽略 `--load-extension`**（日志里会写 `--disable-extensions-except is not allowed in Google Chrome`），所以默认用 Edge；其它 Chromium 用 `--chrome=` 指定。
-- 想长期保留登录态时注意：**直接复用旧配置目录会让 Edge 拒绝加载这个未打包扩展**（日志里是「无法安装该应用或扩展」），所以用 `--seedProfile` 继承登录更稳。
+调试报告保存在 `outputs/debug/`。该工具需要浏览器允许扩展加载和远程调试；登录由使用者在浏览器中完成。
 
-## 设计原则
-
-这些是用户明确要求、后续维护不能违反的约束：
-
-- 过滤只在**数据层**（`fetch` / `XHR` 响应改写）完成，不改页面显示逻辑。
-- 不自动发送下滑，不合成滑动事件，不隐藏预加载视频，不修改视频卡片 DOM。
-- 一批推荐全部命中规则时，返回空列表但保留原来的 `cursor` / `has_more`，由抖音原版分页逻辑继续；必要时扩展预取下一批，多次失败则回退原始数据，优先保证页面可用。
-- 直播不参与识别与屏蔽；普通视频作者正在直播时仍按普通视频识别。
-- 卡片与数据无法确认对应关系时，不用预加载的下一条视频数据兜底。
-- 黑名单只存浏览器本地，不上传任何数据。
-
-## 文档
-
-- 交接与对话压缩：[docs/handoff.md](docs/handoff.md)
-- 版本历史：[CHANGELOG.md](CHANGELOG.md)
-- 隐私说明：`outputs/douyin-bgm-filter-extension/PRIVACY.md`
-- 主扩展使用说明：`outputs/douyin-bgm-filter-extension/README.md`
+隐私说明见 [extension/PRIVACY.md](extension/PRIVACY.md)。
