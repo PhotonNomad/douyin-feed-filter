@@ -42,6 +42,8 @@
 
   let settings = structuredClone(DEFAULT_SETTINGS);
   const knownEntries = new Map();
+  const knownLiveEntries = new Map();
+  const LIVE_CONTAINER_SELECTOR = '[data-e2e="feed-live"], [data-e2e="live-container"], [data-e2e="live-feed-item"], [data-e2e="webcast-feed-item"]';
   const requestedEntries = new Set();
   let lastRequestedAwemeId = "";
 
@@ -311,6 +313,13 @@
       if (tagRule && settings.blocked[tagRule.key]) {
         return tagRule;
       }
+    }
+
+    const tags = (entry.tags || []).map(normalizedText);
+    for (const rule of Object.values(settings.blocked)) {
+      if (rule?.kind !== "tagKeyword") continue;
+      const keyword = normalizedText(rule.value).replace(/^#+/, "").trim();
+      if (keyword && tags.some((tag) => tag.includes(keyword))) return rule;
     }
 
     return null;
@@ -754,7 +763,9 @@
     return chip;
   }
 
-  function saveBlockedRules(rules) {
+  let pendingLiveSave = false;
+
+  function saveBlockedRules(rules, { liveTarget = null } = {}) {
     const cleanRules = (rules || []).filter(Boolean);
     if (!cleanRules.length) return;
 
@@ -763,6 +774,8 @@
     });
 
     const now = Date.now();
+    const previousBlocked = { ...settings.blocked };
+    pendingLiveSave = Boolean(liveTarget);
     for (const rule of cleanRules) {
       settings.blocked[rule.key] = {
         key: rule.key,
@@ -775,19 +788,65 @@
 
     try {
       const storage = chrome?.storage?.local;
-      if (!storage) return;
+      if (!storage) {
+        settings.blocked = previousBlocked;
+        pendingLiveSave = false;
+        return;
+      }
 
       storage.set({ blocked: settings.blocked }, () => {
         // 忽略扩展重载/上下文失效导致的存储错误，避免影响页面。
         const error = chrome?.runtime?.lastError;
-        if (error) logEvent("error", "保存屏蔽规则失败", { message: error.message });
+        if (error) {
+          settings.blocked = previousBlocked;
+          pendingLiveSave = false;
+          logEvent("error", "保存屏蔽规则失败", { message: error.message });
+          showLiveNotice("保存规则失败，请重载扩展后重试。");
+          return;
+        }
+        postSettingsToMain();
+        if (liveTarget) liveActions.run(liveTarget, { feedback: true });
+        else sendNativeNotInterested();
+        pendingLiveSave = false;
       });
     } catch (error) {
+      settings.blocked = previousBlocked;
+      pendingLiveSave = false;
       logEvent("error", "保存屏蔽规则时抛错", { message: String(error?.message || error) });
     }
 
-    sendNativeNotInterested();
   }
+
+  function liveIdentity(entry) {
+    return entry ? entry.roomId || entry.authorId || normalizedText(entry.author) : "";
+  }
+
+  function currentLiveTarget() {
+    const node = findActiveContainer();
+    if (!isLiveContainer(node)) return null;
+    // Resolve against the actual active container, not a preloaded neighbour.
+    const previous = activeContainer;
+    activeContainer = node;
+    const entry = findBestLiveEntryForActiveContainer();
+    activeContainer = previous;
+    return { container: node, identity: liveIdentity(entry), entry };
+  }
+
+  function showLiveNotice(message) {
+    let node = document.getElementById("douyin-live-notice");
+    if (!node) {
+      node = document.createElement("div");
+      node.id = "douyin-live-notice";
+      node.setAttribute("role", "status");
+      node.style.cssText = "position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#222;color:#fff;padding:12px;border-radius:8px;max-width:80vw;pointer-events:none";
+      document.documentElement.appendChild(node);
+    }
+    node.textContent = message;
+    clearTimeout(showLiveNotice.timer);
+    showLiveNotice.timer = setTimeout(() => node.remove(), 5000);
+  }
+
+  const liveActions = globalThis.DouyinLiveActions.create({ document, window, current: currentLiveTarget, log: logEvent, notice: showLiveNotice });
 
   function sendNativeNotInterested() {
     const event = new KeyboardEvent("keydown", {
@@ -805,21 +864,34 @@
   function renderToolbarPanel() {
     if (!toolbarPanel || !toolbarPanel.classList.contains("open")) return;
 
+    const isLive = isLiveContainer(activeContainer);
+
     // 先尝试补数据，再取当前可用的条目：本地 SSR 解析是同步的，
     // 这样第一次点开面板就能显示内容，不用等第二次点击。
-    requestEntryForActiveContainer();
-    const entry = findBestEntryForActiveContainer() || {};
+    if (!isLive) requestEntryForActiveContainer();
+    const entry =
+      (isLive
+        ? findBestLiveEntryForActiveContainer()
+        : findBestEntryForActiveContainer()) || {};
     toolbarPanel.textContent = "";
 
     const title = document.createElement("div");
     title.className = "douyin-bgm-filter-panel-title";
-    title.textContent = "选择要屏蔽的内容";
+    title.textContent = isLive ? "选择要屏蔽的博主" : "选择要屏蔽的内容";
     toolbarPanel.appendChild(title);
 
-    if (!entry.awemeId && !entry.author && !entry.musicId && !entry.title) {
+    if (
+      !entry.awemeId &&
+      !entry.author &&
+      !entry.authorId &&
+      !entry.musicId &&
+      !entry.title
+    ) {
       const note = document.createElement("div");
       note.className = "douyin-bgm-filter-empty";
-      note.textContent = "当前视频数据还未识别到，可稍后重试。";
+      note.textContent = isLive
+        ? "当前直播博主数据还未识别到，可稍后重试。"
+        : "当前视频数据还未识别到，可稍后重试。";
       toolbarPanel.appendChild(note);
     }
 
@@ -838,35 +910,40 @@
         .appendChild(createUnavailableChip("未识别到博主"));
     }
 
-    const tagRow = createRow("标签");
-    const tags = Array.isArray(entry.tags) ? entry.tags : [];
+    const rows = [authorRow];
+    if (!isLive) {
+      const tagRow = createRow("标签");
+      const tags = Array.isArray(entry.tags) ? entry.tags : [];
 
-    if (!tags.length) {
-      tagRow
-        .querySelector(".douyin-bgm-filter-chips")
-        .appendChild(createUnavailableChip("未识别到标签"));
-    } else {
-      for (const tag of tags.slice(0, 16)) {
-        const rule = tagRuleForValue(tag);
+      if (!tags.length) {
         tagRow
           .querySelector(".douyin-bgm-filter-chips")
-          .appendChild(createChip(rule, `#${tag}`));
+          .appendChild(createUnavailableChip("未识别到标签"));
+      } else {
+        for (const tag of tags.slice(0, 16)) {
+          const rule = tagRuleForValue(tag);
+          tagRow
+            .querySelector(".douyin-bgm-filter-chips")
+            .appendChild(createChip(rule, `#${tag}`));
+        }
       }
-    }
 
-    const musicRow = createRow("BGM");
-    const musicText = entry.title
-      ? `${entry.title}${entry.musicId ? ` · ${entry.musicId}` : ""}`
-      : entry.musicId || "未识别";
+      const musicRow = createRow("BGM");
+      const musicText = entry.title
+        ? `${entry.title}${entry.musicId ? ` · ${entry.musicId}` : ""}`
+        : entry.musicId || "未识别";
 
-    if (musicRule) {
-      musicRow
-        .querySelector(".douyin-bgm-filter-chips")
-        .appendChild(createChip(musicRule, musicText));
-    } else {
-      musicRow
-        .querySelector(".douyin-bgm-filter-chips")
-        .appendChild(createUnavailableChip("未识别到 BGM"));
+      if (musicRule) {
+        musicRow
+          .querySelector(".douyin-bgm-filter-chips")
+          .appendChild(createChip(musicRule, musicText));
+      } else {
+        musicRow
+          .querySelector(".douyin-bgm-filter-chips")
+          .appendChild(createUnavailableChip("未识别到 BGM"));
+      }
+
+      rows.push(tagRow, musicRow);
     }
 
     const actions = document.createElement("div");
@@ -903,12 +980,13 @@
         .map((input) => input.__douyinBgmFilterRule)
         .filter(Boolean);
 
-      saveBlockedRules(rules);
+      const liveTarget = isLive ? currentLiveTarget() : null;
+      saveBlockedRules(rules, { liveTarget });
       toolbarPanel.classList.remove("open");
     });
 
     actions.append(cancelButton, blockButton);
-    toolbarPanel.append(authorRow, tagRow, musicRow, actions);
+    toolbarPanel.append(...rows, actions);
     updateBlockButton();
   }
 
@@ -1032,17 +1110,7 @@
 
   function isLiveContainer(node) {
     if (!node?.isConnected) return false;
-
-    const liveSelector = [
-      '[data-e2e="feed-live"]',
-      '[data-e2e="live-container"]',
-      '[data-e2e="live-feed-item"]',
-      '[data-e2e="webcast-feed-item"]'
-    ].join(",");
-
-    return Boolean(
-      node.closest?.(liveSelector) || node.querySelector?.(liveSelector)
-    );
+    return Boolean(node.closest?.(LIVE_CONTAINER_SELECTOR));
   }
 
   function nodeMatchesAwemeId(node, awemeId) {
@@ -1172,6 +1240,7 @@
     );
 
     for (const descendant of Array.from(descendants || [])) {
+      if (isLiveContainer(descendant)) continue;
       for (const name of attributes) {
         const value = descendant.getAttribute?.(name);
         if (value) return value;
@@ -1179,6 +1248,76 @@
     }
 
     return "";
+  }
+
+  function nonLiveContainerText(node) {
+    if (!node) return "";
+
+    const clone = node.cloneNode?.(true);
+    if (!clone) return node.textContent || "";
+
+    for (const liveNode of Array.from(
+      clone.querySelectorAll?.(LIVE_CONTAINER_SELECTOR) || []
+    )) {
+      liveNode.remove();
+    }
+
+    return clone.textContent || "";
+  }
+
+  function findLiveRoomIdForContainer(node) {
+    if (!node) return "";
+
+    const attributes = [
+      "data-room-id",
+      "data-live-room-id",
+      "data-webcast-room-id",
+      "data-roomid"
+    ];
+    const selector = attributes.map((name) => `[${name}]`).join(",");
+    const candidates = [node, ...Array.from(node.querySelectorAll?.(selector) || [])];
+
+    for (const candidate of candidates) {
+      for (const name of attributes) {
+        const value = candidate.getAttribute?.(name);
+        if (value) return value;
+      }
+    }
+
+    return "";
+  }
+
+  function findBestLiveEntryForActiveContainer() {
+    if (!activeContainer || !isLiveContainer(activeContainer)) return null;
+
+    const roomId = findLiveRoomIdForContainer(activeContainer);
+    const text = normalizedText(activeContainer.textContent || "");
+    let bestEntry = null;
+    let bestScore = 0;
+    const pageKey = `${window.location.pathname}${window.location.search}`;
+
+    for (const entry of knownLiveEntries.values()) {
+      if (entry.pageKey && entry.pageKey !== pageKey) continue;
+      if (roomId && entry.roomId === roomId) return entry;
+
+      let score = 0;
+      const author = normalizedText(entry.author);
+      const authorId = normalizedText(entry.authorId);
+      if (author.length >= 2 && text.includes(author)) score += 3;
+      if (authorId.length >= 4 && text.includes(authorId)) score += 2;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestEntry = entry;
+      }
+    }
+
+    if (bestEntry) return bestEntry;
+    // The current anchor may be visible before its room response arrives.
+    const anchor = Array.from(activeContainer.querySelectorAll?.('a[href*="/user/"]') || []).find((link) => String(link.textContent || "").trim());
+    const author = String(anchor?.textContent || "").trim().replace(/^@/, "");
+    const authorId = anchor?.getAttribute?.("href")?.match(/\/user\/([^/?#]+)/)?.[1] || "";
+    return author ? { isLive: true, roomId, author, authorId, tags: [] } : null;
   }
 
   function findBestEntryForActiveContainer() {
@@ -1196,7 +1335,7 @@
         ? activeContainer
         : activeContainer.querySelector?.('[data-e2e="feed-active-video"]') ||
           activeContainer;
-    const text = normalizedText(textRoot.textContent || "");
+    const text = normalizedText(nonLiveContainerText(textRoot));
     let bestEntry = null;
     let bestScore = 0;
 
@@ -1220,39 +1359,55 @@
   }
 
  function handleEntry(entry) {
-  if (!entry) return;
-  if (!entry.awemeId && !entry.musicId && !entry.title && !entry.author) return;
+    if (!entry) return;
+    if (
+      !entry.awemeId &&
+      !entry.musicId &&
+      !entry.title &&
+      !entry.author &&
+      !entry.authorId
+    ) {
+      return;
+    }
 
-  if (entry.awemeId) {
-    knownEntries.set(entry.awemeId, entry);
+    if (entry.isLive) {
+      const liveKey = entry.roomId || entry.authorId || normalizedText(entry.author);
+      if (liveKey) {
+        knownLiveEntries.set(liveKey, entry);
+        while (knownLiveEntries.size > 100) {
+          knownLiveEntries.delete(knownLiveEntries.keys().next().value);
+        }
+      }
+    } else if (entry.awemeId) {
+      knownEntries.set(entry.awemeId, entry);
+    }
+
+    // 预加载的相邻视频也会走到这里，只有「用户当前看的这个」才值得记一条，
+    // 否则日志会被几十条无关记录刷掉。
+    const isCurrentVideo = Boolean(lastRequestedAwemeId) && entry.awemeId === lastRequestedAwemeId;
+    if (isCurrentVideo) {
+      logEvent("info", "识别到当前视频的数据", {
+        awemeId: entry.awemeId,
+        author: entry.author,
+        authorId: entry.authorId,
+        musicId: entry.musicId,
+        title: entry.title,
+        tags: (entry.tags || []).length,
+        source: entry.source
+      });
+    }
+
+    // updateToolbarPosition() 在切换到新的视频容器时会把面板收起来，
+    // 所以这里先记住面板状态，再把新数据渲染回去，避免刚拿到数据面板就没了。
+    const keepPanelOpen = Boolean(toolbarPanel?.classList.contains("open"));
+
+    updateToolbarPosition();
+
+    if (keepPanelOpen) {
+      toolbarPanel?.classList.add("open");
+      renderToolbarPanel();
+    }
   }
-
-  // 预加载的相邻视频也会走到这里，只有「用户当前看的这个」才值得记一条，
-  // 否则日志会被几十条无关记录刷掉。
-  const isCurrentVideo = Boolean(lastRequestedAwemeId) && entry.awemeId === lastRequestedAwemeId;
-  if (isCurrentVideo) {
-    logEvent("info", "识别到当前视频的数据", {
-      awemeId: entry.awemeId,
-      author: entry.author,
-      authorId: entry.authorId,
-      musicId: entry.musicId,
-      title: entry.title,
-      tags: (entry.tags || []).length,
-      source: entry.source
-    });
-  }
-
-  // updateToolbarPosition() 在切换到新的视频容器时会把面板收起来，
-  // 所以这里先记住面板状态，再把新数据渲染回去，避免刚拿到数据面板就没了。
-  const keepPanelOpen = Boolean(toolbarPanel?.classList.contains("open"));
-
-  updateToolbarPosition();
-
-  if (keepPanelOpen) {
-    toolbarPanel?.classList.add("open");
-    renderToolbarPanel();
-  }
-}
 
 function decodeLocalScriptText(text) {
   const raw = String(text || "");
@@ -1483,15 +1638,25 @@ function updateToolbarPosition() {
 
   ensureToolbar();
   activeContainer = findActiveContainer();
+  const isLive = isLiveContainer(activeContainer);
+  if (!isLive) liveActions.reset();
+  if (isLive && !pendingLiveSave) {
+    const entry = findBestLiveEntryForActiveContainer();
+    const rule = authorRuleForEntry(entry);
+    if (rule && settings.blocked[rule.key]) {
+      const target = { container: activeContainer, identity: liveIdentity(entry), entry };
+      liveActions.run(target, { automatic: true });
+    }
+  }
+  toolbarButton.title = isLive ? "屏蔽直播博主" : "屏蔽音乐 / 博主 / 标签";
+  toolbarButton.setAttribute(
+    "aria-label",
+    isLive ? "屏蔽直播博主" : "屏蔽音乐、博主或标签"
+  );
 
   if (activeContainer !== lastToolbarContainer) {
     lastToolbarContainer = activeContainer;
     toolbarPanel?.classList.remove("open");
-  }
-
-  if (isLiveContainer(activeContainer)) {
-    toolbar.style.display = "none";
-    return;
   }
 
   if (!activeContainer) {
@@ -1506,7 +1671,9 @@ function updateToolbarPosition() {
   }
 
   let targetRect = rect;
-  const videos = activeContainer.querySelectorAll?.("video") || [];
+  const videos = Array.from(activeContainer.querySelectorAll?.("video") || []).filter(
+    (video) => isLive || !isLiveContainer(video)
+  );
   let largestVideo = null;
   let largestArea = 0;
 

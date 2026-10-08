@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>诊断 · 抖音视频屏蔽</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="subpage-header">
+      <a class="back-link" href="popup.html" aria-label="返回主页面">返回</a>
+      <h1>诊断</h1>
+    </header>
+    <main>
+      <section>
+        <p class="hint">
+          日志只保存在本机，记录识别与过滤过程。遇到问题时导出这份文件发给开发者即可。
+        </p>
+        <div class="diagnostic-actions">
+          <button id="exportLog">导出诊断日志</button>
+          <button id="copyLog" class="ghost small">复制</button>
+          <button id="clearLog" class="ghost small">清空</button>
+        </div>
+        <p id="logStatus" class="empty" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+    <script src="diagnostics.js"></script>
+  </body>
+</html>

@@ -7,8 +7,21 @@
   box-sizing: border-box;
 }
 
+html {
+  width: 360px;
+  min-width: 360px;
+  max-width: 360px;
+  /* Keep viewport scrollbars out of Chrome's popup width calculation. */
+  overflow: hidden;
+}
+
 body {
   width: 360px;
+  /* Let Chrome resize to content instead of reusing the previous popup height. */
+  max-height: 600px;
+  overflow-y: auto;
+  /* Reserve space inside the same 360px box on long and short pages. */
+  scrollbar-gutter: stable;
   margin: 0;
   padding: 14px;
   background: #f6f7f9;
@@ -130,6 +143,20 @@ button.small {
   display: flex;
   gap: 8px;
 }
+
+.page-links { display: flex; gap: 8px; margin-bottom: 10px; }
+.page-links a, .back-link { color: #17212b; background: #eef0f2; border-radius: 7px; padding: 10px; text-decoration: none; font-size: 12px; }
+.page-links a { flex: 1; text-align: center; }
+.page-links a:hover, .back-link:hover { background: #e1e5e9; }
+.page-links a:focus-visible, .back-link:focus-visible { outline: 2px solid #17212b; outline-offset: 2px; }
+.subpage-header { justify-content: flex-start; }
+.subpage-header .back-link { flex: none; }
+
+#backupSection h2 { margin-bottom: 8px; }
+#restoreBackupForm { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+#restoreBackupForm label { font-size: 12px; }
+#restoreBackupForm input, #restoreBackupForm select { width: 100%; min-width: 0; }
+#backupStatus { margin-top: 8px; overflow-wrap: anywhere; }
 
 .hint {
   margin: 0 0 8px;
@@ -257,12 +284,6 @@ input {
   border-radius: 7px;
   padding: 7px 8px;
   font-size: 12px;
-}
-
-footer {
-  font-size: 11px;
-  line-height: 1.4;
-  color: #6d7883;
 }
 
 .switch {

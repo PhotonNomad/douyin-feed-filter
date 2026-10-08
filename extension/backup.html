@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>备份与恢复 · 抖音视频屏蔽</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="subpage-header">
+      <a class="back-link" href="popup.html" aria-label="返回主页面">返回</a>
+      <h1>备份与恢复</h1>
+    </header>
+    <main>
+      <section id="backupSection">
+        <p class="hint">备份规则、历史记录和设置到 JSON 文件，卸载前请保存。诊断日志不包含在内。撤销恢复会还原恢复前的数据，包括规则和记录。</p>
+        <button id="exportBackup" type="button">导出备份</button>
+        <form id="restoreBackupForm">
+          <label for="backupFile">选择备份文件</label>
+          <input id="backupFile" name="backupFile" type="file" accept=".json,application/json" aria-describedby="backupStatus" />
+          <label for="backupMode">恢复方式</label>
+          <select id="backupMode" name="backupMode">
+            <option value="merge">合并（保留现有规则，设置以备份为准）</option>
+            <option value="replace">覆盖（用备份替换现有规则、记录和设置）</option>
+          </select>
+          <div class="diagnostic-actions">
+            <button id="restoreBackup" type="submit" disabled>确认恢复</button>
+            <button id="undoRestore" type="button" class="ghost small" disabled>撤销上次恢复</button>
+          </div>
+        </form>
+        <p id="backupStatus" class="empty" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+    <script src="backup.js"></script>
+    <script src="backup-ui.js"></script>
+  </body>
+</html>

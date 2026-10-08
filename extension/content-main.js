@@ -138,8 +138,143 @@
     };
   }
 
+  function extractLiveRoomAuthor(node) {
+    const rooms = [
+      node.room,
+      node.room_info,
+      node.roomInfo,
+      node.room_data,
+      node.roomData,
+      node.live_room,
+      node.liveRoom,
+      node.webcast_room,
+      node.webcastRoom
+    ].filter((value) => value && typeof value === "object");
+    const owners = [
+      node.owner,
+      node.owner_info,
+      node.ownerInfo,
+      node.owner_user,
+      node.ownerUser,
+      node.user,
+      node.user_info,
+      node.userInfo,
+      node.anchor,
+      node.anchor_info,
+      node.anchorInfo,
+      node.author,
+      node.author_info,
+      node.authorInfo,
+      ...rooms.flatMap((room) => [
+        room.owner,
+        room.owner_info,
+        room.ownerInfo,
+        room.user,
+        room.user_info,
+        room.userInfo,
+        room.anchor,
+        room.anchor_info,
+        room.anchorInfo
+      ])
+    ];
+
+    for (const owner of owners) {
+      if (!owner || typeof owner !== "object") continue;
+
+      const nickname = firstString(
+        owner.nickname,
+        owner.nick_name,
+        owner.nickName,
+        owner.unique_id,
+        owner.uniqueId,
+        owner.user_name,
+        owner.userName,
+        owner.display_name,
+        owner.displayName,
+        owner.name,
+        owner.author
+      );
+      const id = firstString(
+        owner.sec_uid,
+        owner.secUid,
+        owner.uid,
+        owner.user_id,
+        owner.userId,
+        owner.id_str,
+        owner.idStr,
+        owner.id
+      );
+
+      if (nickname || id) return { nickname, id };
+    }
+
+    return { nickname: "", id: "" };
+  }
+
+  function normalizeLiveRoom(node) {
+    if (!isLiveOnlyNode(node)) return null;
+
+    const owner = extractLiveRoomAuthor(node);
+    if (!owner.nickname && !owner.id) return null;
+
+    const room = [
+      node.room,
+      node.room_info,
+      node.roomInfo,
+      node.room_data,
+      node.roomData,
+      node.live_room,
+      node.liveRoom,
+      node.webcast_room,
+      node.webcastRoom
+    ].find((value) => value && typeof value === "object") || {};
+
+    return {
+      awemeId: "",
+      roomId: firstString(
+        node.room_id,
+        node.room_id_str,
+        node.roomId,
+        node.roomIdStr,
+        node.live_room_id,
+        node.liveRoomId,
+        node.webcast_room_id,
+        node.webcastRoomId,
+        node.web_rid,
+        node.webRid,
+        room.room_id,
+        room.room_id_str,
+        room.roomId,
+        room.web_rid,
+        room.webRid,
+        room.id
+      ),
+      author: owner.nickname,
+      authorId: owner.id,
+      musicId: "",
+      title: "",
+      videoTitle: "",
+      tags: [],
+      isLive: true,
+      pageKey: `${window.location.pathname}${window.location.search}`,
+      seenAt: Date.now(),
+      source: "douyin-web-live-room-fields"
+    };
+  }
+
   function isLiveNode(node) {
     if (!node || typeof node !== "object") return false;
+
+    const room =
+      node.room ||
+      node.room_info ||
+      node.roomInfo ||
+      node.room_data ||
+      node.roomData ||
+      node.live_room ||
+      node.liveRoom ||
+      node.webcast_room ||
+      node.webcastRoom;
 
     if (
       firstString(
@@ -154,7 +289,15 @@
         node.live_id,
         node.liveId,
         node.webcast_id,
-        node.webcastId
+        node.webcastId,
+        node.web_rid,
+        node.webRid,
+        room?.room_id,
+        room?.room_id_str,
+        room?.roomId,
+        room?.web_rid,
+        room?.webRid,
+        room?.id
       )
     ) {
       return true;
@@ -293,7 +436,11 @@
       seen.add(node);
       visited++;
 
-      if (isLiveOnlyNode(node)) continue;
+      if (isLiveOnlyNode(node)) {
+        const liveEntry = normalizeLiveRoom(node);
+        if (liveEntry) entries.push(liveEntry);
+        continue;
+      }
 
       const entry = normalizeAwemeLike(node);
       if (entry) {
@@ -372,6 +519,13 @@
     for (const tag of entry.tags || []) {
       const rule = buildRule("tag", tag);
       if (rule && rules[rule.key]) return rule;
+    }
+
+    const tags = (entry.tags || []).map(normalizedText);
+    for (const rule of Object.values(rules)) {
+      if (rule?.kind !== "tagKeyword") continue;
+      const keyword = normalizedText(rule.value).replace(/^#+/, "").trim();
+      if (keyword && tags.some((tag) => tag.includes(keyword))) return rule;
     }
 
     return null;
@@ -830,14 +984,14 @@
 
   function shouldParseUrl(url) {
     if (!url || noisyUrlPattern.test(url)) return false;
-    return /\/aweme\/v1\/web\//i.test(url);
+    return /\/aweme\/v1\/web\/|\/webcast\/(?:room|user)\//i.test(url);
   }
 
   // 只有这些接口里才可能带视频信息；emoji / IM / AB 参数之类的接口没必要解析。
   const noisyApiPattern =
     /(emoji|\/im\/|ab\/params|hot\/search|notice|settings|feedback|entrance|config|resource)/i;
   const videoApiPattern =
-    /(aweme\/detail|aweme\/post|aweme\/related|aweme\/feed|\/feed|search\/item|history|collection|mix\/|series|module|recommend)/i;
+    /(aweme\/detail|aweme\/post|aweme\/related|aweme\/feed|\/feed|search\/item|history|collection|mix\/|series|module|recommend|webcast\/(room|user)|live_room|live\/(room|user))/i;
 
   function isVideoDataUrl(url) {
     if (!url || noisyApiPattern.test(url)) return false;
@@ -852,7 +1006,25 @@
   function parseResponseBody(text, url) {
     if (!text || text.length > MAX_BODY_BYTES) return;
     // 先做一次几乎零成本的检查，避免去 JSON.parse 表情包之类的大响应。
-    if (!text.includes('"aweme_id"') && !text.includes('"awemeId"')) return;
+    const hasAweme = text.includes('"aweme_id"') || text.includes('"awemeId"');
+    const hasLiveRoom = [
+      '"room_id"',
+      '"room_id_str"',
+      '"roomId"',
+      '"live_room_id"',
+      '"liveRoomId"',
+      '"webcast_room_id"',
+      '"webcastRoomId"',
+      '"live_id"',
+      '"liveId"',
+      '"webcast_id"',
+      '"webcastId"',
+      '"web_rid"',
+      '"webRid"',
+      '"live_status"',
+      '"liveStatus"'
+    ].some((field) => text.includes(field));
+    if (!hasAweme && !hasLiveRoom) return;
 
     let data;
     try {
@@ -865,7 +1037,7 @@
     for (const entry of entries.slice(0, 500)) postEntry(entry);
 
     if (entries.length) {
-      logEvent("info", "从接口读到视频数据", {
+      logEvent("info", "从接口读到视频或直播数据", {
         url: String(url || "").slice(0, 160),
         entries: entries.length
       });
