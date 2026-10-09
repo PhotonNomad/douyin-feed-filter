@@ -11,6 +11,9 @@
     customImage: "",
     buttonSize: 40
   };
+  // 只有这些键变化才需要重载设置：日志和屏蔽记录变化很频繁，没必要跟着重算。
+  const SETTINGS_KEYS = ["enabled", "blocked", "buttonIcon", "customImage", "buttonSize"];
+  const MAX_KNOWN_ENTRIES = 300;
 
   const BUTTON_ICONS = {
     "not-interested": `
@@ -572,123 +575,6 @@
     toolbarButton.style.height = `${size}px`;
   }
 
-  function findActionRailIcons(container) {
-    if (!container?.isConnected) return [];
-
-    const selector = ACTION_RAIL_SELECTORS.join(",");
-    const nodes = Array.from(container.querySelectorAll(selector));
-    const visibleNodes = nodes.filter((node) => {
-      const rect = node.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    });
-
-    if (!visibleNodes.length) {
-      const documentNodes = Array.from(document.querySelectorAll(selector)).filter(
-        (node) => {
-          const rect = node.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        }
-      );
-
-      if (documentNodes.length) {
-        const groups = new Map();
-        for (const node of documentNodes) {
-          const rect = node.getBoundingClientRect();
-          const centerX = rect.left + rect.width / 2;
-          const groupKey = Math.round(centerX / 12);
-          if (!groups.has(groupKey)) groups.set(groupKey, []);
-          groups.get(groupKey).push(node);
-        }
-
-        const containerRect = container.getBoundingClientRect();
-        const containerRightEdge = containerRect.right;
-        let bestGroup = [];
-        let bestScore = Infinity;
-
-        for (const group of groups.values()) {
-          const groupCenterX =
-            group.reduce((sum, node) => {
-              const rect = node.getBoundingClientRect();
-              return sum + rect.left + rect.width / 2;
-            }, 0) / group.length;
-
-          const score =
-            Math.abs(groupCenterX - containerRightEdge) -
-            group.length * 2;
-
-          if (score < bestScore) {
-            bestScore = score;
-            bestGroup = group;
-          }
-        }
-
-        if (bestGroup.length) {
-          return bestGroup.sort((a, b) => {
-            const aRect = a.getBoundingClientRect();
-            const bRect = b.getBoundingClientRect();
-            return aRect.top - bRect.top || aRect.left - bRect.left;
-          });
-        }
-      }
-    }
-
-    return visibleNodes.sort((a, b) => {
-      const aRect = a.getBoundingClientRect();
-      const bRect = b.getBoundingClientRect();
-      return aRect.top - bRect.top || aRect.left - bRect.left;
-    });
-  }
-
-  function positionToolbarToActionRail(icons) {
-    if (!icons.length || !toolbar || !toolbarButton) return false;
-
-    const firstIcon = icons[0];
-    const lastIcon = icons[icons.length - 1];
-    const anchorIcon =
-      icons.find((icon) => icon.matches?.('[data-e2e="video-player-share"]')) ||
-      icons.find((icon) => icon.matches?.('[data-e2e="video-player-collect"]')) ||
-      lastIcon;
-    const firstRect = firstIcon.getBoundingClientRect();
-    const lastRect = anchorIcon.getBoundingClientRect();
-    const buttonRect = toolbarButton.getBoundingClientRect();
-    const buttonSize = buttonRect.width || 40;
-    const previousIcon = icons.length > 1 ? icons[icons.length - 2] : null;
-    const gap = previousIcon
-      ? Math.max(
-          6,
-          Math.round(
-            lastRect.top - previousIcon.getBoundingClientRect().bottom
-          )
-        )
-      : 10;
-
-    const centerX =
-      icons.reduce((sum, icon) => {
-        const rect = icon.getBoundingClientRect();
-        return sum + rect.left + rect.width / 2;
-      }, 0) / icons.length;
-
-    let top = lastRect.bottom + gap;
-    if (top + buttonSize > window.innerHeight - 12) {
-      top = firstRect.top - gap - buttonSize;
-    }
-
-    const left = centerX - buttonSize / 2;
-    toolbar.style.display = "block";
-    toolbar.style.top = `${Math.max(12, top)}px`;
-    toolbar.style.left = `${Math.max(12, left)}px`;
-    toolbar.style.right = "auto";
-
-    const spaceBelow = window.innerHeight - (top + buttonSize);
-    const spaceAbove = top;
-    toolbarPanel?.classList.toggle(
-      "above",
-      spaceBelow < 340 && spaceAbove > 340
-    );
-
-    return true;
-  }
-
   function ensureToolbar() {
     if (toolbar?.isConnected) return;
 
@@ -763,8 +649,6 @@
     return chip;
   }
 
-  let pendingLiveSave = false;
-
   function saveBlockedRules(rules, { liveTarget = null } = {}) {
     const cleanRules = (rules || []).filter(Boolean);
     if (!cleanRules.length) return;
@@ -775,7 +659,6 @@
 
     const now = Date.now();
     const previousBlocked = { ...settings.blocked };
-    pendingLiveSave = Boolean(liveTarget);
     for (const rule of cleanRules) {
       settings.blocked[rule.key] = {
         key: rule.key,
@@ -790,7 +673,6 @@
       const storage = chrome?.storage?.local;
       if (!storage) {
         settings.blocked = previousBlocked;
-        pendingLiveSave = false;
         return;
       }
 
@@ -799,19 +681,16 @@
         const error = chrome?.runtime?.lastError;
         if (error) {
           settings.blocked = previousBlocked;
-          pendingLiveSave = false;
           logEvent("error", "保存屏蔽规则失败", { message: error.message });
           showLiveNotice("保存规则失败，请重载扩展后重试。");
           return;
         }
         postSettingsToMain();
-        if (liveTarget) liveActions.run(liveTarget, { feedback: true });
+        if (liveTarget) liveActions.run(liveTarget);
         else sendNativeNotInterested();
-        pendingLiveSave = false;
       });
     } catch (error) {
       settings.blocked = previousBlocked;
-      pendingLiveSave = false;
       logEvent("error", "保存屏蔽规则时抛错", { message: String(error?.message || error) });
     }
 
@@ -822,7 +701,8 @@
   }
 
   function currentLiveTarget() {
-    const node = findActiveContainer();
+    const active = findActiveContainer();
+    const node = active?.closest(LIVE_CONTAINER_SELECTOR) || active;
     if (!isLiveContainer(node)) return null;
     // Resolve against the actual active container, not a preloaded neighbour.
     const previous = activeContainer;
@@ -846,7 +726,7 @@
     showLiveNotice.timer = setTimeout(() => node.remove(), 5000);
   }
 
-  const liveActions = globalThis.DouyinLiveActions.create({ document, window, current: currentLiveTarget, log: logEvent, notice: showLiveNotice });
+  const liveActions = globalThis.DouyinLiveActions.create({ document, window, current: currentLiveTarget, log: logEvent, notice: showLiveNotice, invokeCallback: globalThis.DouyinNativeFeedback.invoke });
 
   function sendNativeNotInterested() {
     const event = new KeyboardEvent("keydown", {
@@ -1019,14 +899,16 @@
     } catch (_) {}
   }
 
+  function scheduleBlockedFlush() {
+    if (blockedHistorySaveTimer) return;
+    blockedHistorySaveTimer = setTimeout(flushBlockedRecords, 0);
+  }
+
   function saveBlockedRecord(record) {
     if (!record) return;
 
     pendingBlockedRecords.push(record);
-
-    if (!blockedHistorySaveTimer) {
-      blockedHistorySaveTimer = setTimeout(flushBlockedRecords, 0);
-    }
+    scheduleBlockedFlush();
   }
 
   function loadBlockedHistory() {
@@ -1047,23 +929,19 @@
           ? items.blockedHistory
           : [];
         blockedHistoryLoaded = true;
-        if (pendingBlockedRecords.length) flushBlockedRecords();
+        if (pendingBlockedRecords.length) scheduleBlockedFlush();
       });
     } catch (_) {
       blockedHistoryLoaded = true;
     }
   }
 
+  // 未就绪时直接返回，等历史加载完成或上一次写入回调再触发；
+  // 旧实现在这里用 setTimeout(..., 0) 自排定时器，storage 不回调时会一直空转。
   function flushBlockedRecords() {
     blockedHistorySaveTimer = 0;
 
-    if (!blockedHistoryLoaded || isSavingBlockedHistory) {
-      if (!blockedHistorySaveTimer) {
-        blockedHistorySaveTimer = setTimeout(flushBlockedRecords, 0);
-      }
-      return;
-    }
-
+    if (!blockedHistoryLoaded || isSavingBlockedHistory) return;
     if (!pendingBlockedRecords.length) return;
 
     const records = pendingBlockedRecords;
@@ -1079,10 +957,11 @@
       }
 
       storage.set({ blockedHistory: [...blockedHistory] }, () => {
-        if (chrome?.runtime?.lastError) {
-          // 保留内存记录，避免页面报错；下次仍会尝试同步。
-        }
+        // 忽略扩展重载/上下文失效导致的存储错误，避免影响页面；
+        // 未写进去的记录留在内存里，下次继续尝试。
+        void chrome?.runtime?.lastError;
         isSavingBlockedHistory = false;
+        if (pendingBlockedRecords.length) scheduleBlockedFlush();
       });
     } catch (_) {
       isSavingBlockedHistory = false;
@@ -1111,56 +990,6 @@
   function isLiveContainer(node) {
     if (!node?.isConnected) return false;
     return Boolean(node.closest?.(LIVE_CONTAINER_SELECTOR));
-  }
-
-  function nodeMatchesAwemeId(node, awemeId) {
-    if (!node || !awemeId) return false;
-
-    const candidates = [
-      node.getAttribute?.("data-aweme-id"),
-      node.getAttribute?.("data-id"),
-      node.getAttribute?.("data-item-id"),
-      node.getAttribute?.("data-video-id"),
-      node.getAttribute?.("data-vid"),
-      node.getAttribute?.("data-e2e")
-    ];
-
-    return candidates.some((value) => {
-      if (!value) return false;
-      return value === awemeId || value.endsWith(`-${awemeId}`);
-    });
-  }
-
-  function findAwemeNodes(awemeId) {
-    if (!awemeId) return [];
-
-    const selector = [
-      "[data-aweme-id]",
-      "[data-id]",
-      "[data-item-id]",
-      "[data-video-id]",
-      "[data-vid]",
-      "[data-e2e]"
-    ].join(",");
-
-    return Array.from(document.querySelectorAll(selector)).filter((node) =>
-      nodeMatchesAwemeId(node, awemeId)
-    );
-  }
-
-  function containerForNode(node) {
-    return (
-      node.closest?.(
-        [
-          '[data-e2e="feed-item"]',
-          '[data-e2e="feed-active-video"]',
-          '[data-e2e="slide-list-item"]',
-          '[data-e2e="recommend-item"]',
-          '[data-e2e="video-card"]',
-          '[data-e2e="feed-video"]'
-        ].join(",")
-      ) || node
-    );
   }
 
   function findActiveContainer() {
@@ -1380,6 +1209,12 @@
       }
     } else if (entry.awemeId) {
       knownEntries.set(entry.awemeId, entry);
+      while (knownEntries.size > MAX_KNOWN_ENTRIES) {
+        const oldest = knownEntries.keys().next().value;
+        knownEntries.delete(oldest);
+        // 一起放掉请求标记，滚回旧视频时还能重新识别。
+        requestedEntries.delete(oldest);
+      }
     }
 
     // 预加载的相邻视频也会走到这里，只有「用户当前看的这个」才值得记一条，
@@ -1639,15 +1474,6 @@ function updateToolbarPosition() {
   ensureToolbar();
   activeContainer = findActiveContainer();
   const isLive = isLiveContainer(activeContainer);
-  if (!isLive) liveActions.reset();
-  if (isLive && !pendingLiveSave) {
-    const entry = findBestLiveEntryForActiveContainer();
-    const rule = authorRuleForEntry(entry);
-    if (rule && settings.blocked[rule.key]) {
-      const target = { container: activeContainer, identity: liveIdentity(entry), entry };
-      liveActions.run(target, { automatic: true });
-    }
-  }
   toolbarButton.title = isLive ? "屏蔽直播博主" : "屏蔽音乐 / 博主 / 标签";
   toolbarButton.setAttribute(
     "aria-label",
@@ -1806,7 +1632,7 @@ function scheduleToolbarPosition() {
         : [];
       blockedHistoryLoaded = true;
     }
-    loadSettings();
+    if (SETTINGS_KEYS.some((key) => changes[key])) loadSettings();
   });
   } catch (_) {}
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音视频屏蔽",
-  "version": "0.5.34",
+  "version": "0.5.37",
   "description": "基于抖音网页版返回的官方字段，在网络响应层屏蔽指定 BGM、博主或标签。",
   "permissions": [
     "storage"
@@ -22,6 +22,7 @@
         "https://*.douyin.com/*"
       ],
       "js": [
+        "native-feedback-main.js",
         "content-main.js"
       ],
       "run_at": "document_start",
@@ -32,6 +33,7 @@
         "https://*.douyin.com/*"
       ],
       "js": [
+        "native-feedback-client.js",
         "live-actions.js",
         "content-isolated.js"
       ],

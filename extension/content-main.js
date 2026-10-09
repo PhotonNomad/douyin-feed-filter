@@ -44,9 +44,6 @@
     ]);
   }
 
-  const noisyUrlPattern =
-    /(report|monitor|telemetry|slardar|collect|log|tracking|beacon|metric)/i;
-
   function firstString(...values) {
     for (const value of values) {
       if (typeof value === "string" && value.trim()) return value.trim();
@@ -503,22 +500,22 @@
 
     if (entry.musicId) {
       const rule = buildRule("music", entry.musicId);
-      if (rule && rules[rule.key]) return rule;
+      if (rule && rules[rule.key]) return rules[rule.key];
     }
 
     if (entry.title) {
       const rule = buildRule("music", entry.title);
-      if (rule && rules[rule.key]) return rule;
+      if (rule && rules[rule.key]) return rules[rule.key];
     }
 
     if (entry.author || entry.authorId) {
       const rule = buildRule("author", entry.author || entry.authorId);
-      if (rule && rules[rule.key]) return rule;
+      if (rule && rules[rule.key]) return rules[rule.key];
     }
 
     for (const tag of entry.tags || []) {
       const rule = buildRule("tag", tag);
-      if (rule && rules[rule.key]) return rule;
+      if (rule && rules[rule.key]) return rules[rule.key];
     }
 
     const tags = (entry.tags || []).map(normalizedText);
@@ -621,6 +618,15 @@
         if (entry) return entry;
       }
 
+      // Resolve all normal-video wrappers first: their live thumbnails must
+      // never turn the parent video into a live recommendation.
+      const liveEntry = normalizeLiveRoom(item);
+      if (liveEntry) return liveEntry;
+      for (const key of wrapperKeys) {
+        const entry = normalizeLiveRoom(item[key]);
+        if (entry) return entry;
+      }
+
       return null;
     }
 
@@ -642,6 +648,12 @@
           kept.push(item);
         }
         return kept;
+      }
+
+      // 数组要原样保留：整体重建时把 "extra" 这类非推荐列表的数组变成对象，
+      // 会让页面拿到结构被破坏的响应。
+      if (Array.isArray(value)) {
+        return value.map((item, index) => visit(item, String(index)));
       }
 
       if (value && typeof value === "object") {
@@ -982,11 +994,6 @@
     window.location.origin
   );
 
-  function shouldParseUrl(url) {
-    if (!url || noisyUrlPattern.test(url)) return false;
-    return /\/aweme\/v1\/web\/|\/webcast\/(?:room|user)\//i.test(url);
-  }
-
   // 只有这些接口里才可能带视频信息；emoji / IM / AB 参数之类的接口没必要解析。
   const noisyApiPattern =
     /(emoji|\/im\/|ab\/params|hot\/search|notice|settings|feedback|entrance|config|resource)/i;
@@ -1063,6 +1070,7 @@
   async function getFilteredFeedResponse(response, requestUrl) {
     let currentResponse = response;
     let currentUrl = requestUrl || response?.url || "";
+    const seenCursors = new Set();
 
     for (let page = 0; page < MAX_PREFETCH_FEED_PAGES; page++) {
       const text = await currentResponse.clone().text();
@@ -1079,17 +1087,29 @@
       }
 
       if (!filtered.hasMore || !filtered.nextCursor) {
-        return currentResponse;
+        return createFilteredResponse(currentResponse, filtered.text);
       }
+
+      // 同一个游标只取一次：响应里如果回显了请求的 cursor，nextCursor 会和上一轮
+      // 相同，再取就还是同一页，纯属浪费请求。
+      if (seenCursors.has(filtered.nextCursor)) {
+        return createFilteredResponse(currentResponse, filtered.text);
+      }
+      seenCursors.add(filtered.nextCursor);
 
       const nextUrl = buildNextFeedUrl(currentUrl, filtered.nextCursor);
-      if (!nextUrl) {
-        return currentResponse;
+      if (!nextUrl || page === MAX_PREFETCH_FEED_PAGES - 1) {
+        return createFilteredResponse(currentResponse, filtered.text);
       }
 
-      const nextResponse = await originalFetch(nextUrl);
+      let nextResponse;
+      try {
+        nextResponse = await originalFetch(nextUrl);
+      } catch (_) {
+        return createFilteredResponse(currentResponse, filtered.text);
+      }
       if (!nextResponse?.ok) {
-        return currentResponse;
+        return createFilteredResponse(currentResponse, filtered.text);
       }
 
       currentResponse = nextResponse;
@@ -1208,12 +1228,6 @@
     const text = getXhrText(xhr);
     const filtered = filterFeedText(text, url);
     if (!filtered || filtered.removed === 0) {
-      xhr.__douyinBgmFilterFinalized = true;
-      parseResponseBody(text, url);
-      return;
-    }
-
-    if (filtered.allowed === 0) {
       xhr.__douyinBgmFilterFinalized = true;
       parseResponseBody(text, url);
       return;
