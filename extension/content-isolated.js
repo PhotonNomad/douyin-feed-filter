@@ -47,6 +47,18 @@
   const knownEntries = new Map();
   const knownLiveEntries = new Map();
   const LIVE_CONTAINER_SELECTOR = '[data-e2e="feed-live"], [data-e2e="live-container"], [data-e2e="live-feed-item"], [data-e2e="webcast-feed-item"]';
+  // 只有在卡片真是 static 时才写 position: relative，原值存在这个属性里以便还原。
+  const CARD_POSITION_ATTR = "data-douyin-bgm-filter-position";
+  // 与 findActiveContainer() 用的那组选择器保持一致：注入目标就是同一个「卡片」概念。
+  const CARD_SELECTOR = [
+    '[data-e2e="feed-active-video"]',
+    '[data-e2e="slide-list-item"]',
+    '[data-e2e="feed-item"]',
+    '[data-e2e="recommend-item"]',
+    '[data-e2e="video-card"]',
+    '[data-e2e="feed-video"]',
+    LIVE_CONTAINER_SELECTOR
+  ].join(",");
   const requestedEntries = new Set();
   let lastRequestedAwemeId = "";
 
@@ -159,19 +171,32 @@
     } catch (_) {}
   }
 
+  function runtimeErrorSource(filename, stack) {
+    let extensionRoot = "";
+    try { extensionRoot = chrome.runtime.getURL(""); } catch (_) {}
+    if (extensionRoot && (String(filename || "").startsWith(extensionRoot) || String(stack || "").includes(extensionRoot))) return "extension";
+    return filename ? "page" : "unknown";
+  }
+
   window.addEventListener("error", (event) => {
-    logEvent("error", "页面里出现未捕获错误", {
+    const source = runtimeErrorSource(event.filename, event.error?.stack);
+    logEvent(source === "extension" ? "error" : "warn", source === "extension" ? "扩展出现未捕获错误" : "页面运行错误（来源见诊断信息）", {
+      source,
       message: event.message,
       file: event.filename,
       line: event.lineno,
-      column: event.colno
+      column: event.colno,
+      stack: event.error?.stack || ""
     });
   });
 
   window.addEventListener("unhandledrejection", (event) => {
     const reason = event.reason;
-    logEvent("error", "出现未处理的 Promise 拒绝", {
-      message: reason?.message || String(reason || "")
+    const source = runtimeErrorSource("", reason?.stack);
+    logEvent(source === "extension" ? "error" : "warn", source === "extension" ? "扩展出现未处理的 Promise 拒绝" : "页面 Promise 拒绝（来源见诊断信息）", {
+      source,
+      message: reason?.message || String(reason || ""),
+      stack: reason?.stack || ""
     });
   });
 
@@ -203,12 +228,13 @@
   } catch (_) {}
 
   let activeContainer = null;
-  let toolbar = null;
-  let toolbarButton = null;
-  let toolbarPanel = null;
+  // 每张卡片一份工具栏记录：
+  // { card, root, button, panel, isLive, open, measured, metrics, wrotePosition }
+  const cardToolbars = new Set();
+  let activeToolbar = null;
+  let openToolbar = null;
   // 记录上一次「算出来的 X」和真实点赞图标中心的偏差，只用于日志，不参与定位。
   let lastAnchorDrift = null;
-  let lastToolbarContainer = null;
   let toolbarPositionTimer = 0;
   let blockedHistory = [];
   let blockedHistoryLoaded = false;
@@ -334,10 +360,33 @@
     const style = document.createElement("style");
     style.id = "douyin-bgm-filter-style";
     style.textContent = `
+      /* 按钮长在卡片里，所以是 absolute 而不是 fixed：滚动由浏览器负责，扩展不再参与。
+         下面这一串"复位"属性是必需的——挂在 <html> 下时几乎不继承任何东西，
+         进了卡片就会继承抖音的 white-space / line-height / box-sizing，面板会错乱。 */
       .douyin-bgm-filter-toolbar {
-        position: fixed;
+        position: absolute;
         z-index: 2147483000;
         pointer-events: none;
+        display: none;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        font-size: 12px;
+        font-style: normal;
+        font-weight: 400;
+        line-height: 1.35;
+        letter-spacing: normal;
+        text-align: left;
+        text-transform: none;
+        text-indent: 0;
+        white-space: normal;
+        word-spacing: normal;
+        direction: ltr;
+        color: #fff;
+        float: none;
+        transform: none;
       }
 
       .douyin-bgm-filter-button {
@@ -391,7 +440,9 @@
         backdrop-filter: blur(8px);
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
         max-height: min(560px, calc(100vh - 24px));
+        max-width: min(300px, calc(100vw - 24px));
         overflow: auto;
+        overscroll-behavior: contain;
       }
 
       .douyin-bgm-filter-panel.open {
@@ -536,8 +587,14 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  function renderToolbarButtonIcon() {
-    if (!toolbarButton) return;
+  // 按钮尺寸只有一个来源：设置。渲染和定位都必须用它，
+  // 否则会出现「按 100px 算 X、按钮却渲染成 56px」的横向错位。
+  function resolvedButtonSize() {
+    return Math.min(56, Math.max(32, Number(settings.buttonSize) || 40));
+  }
+
+  function renderCardToolbarIcon(state) {
+    if (!state?.button) return;
 
     const iconName =
       settings.buttonIcon === "custom" && settings.customImage
@@ -546,69 +603,150 @@
           ? settings.buttonIcon
           : "not-interested";
 
-    toolbarButton.textContent = "";
+    state.button.textContent = "";
 
     if (iconName === "custom") {
       const image = document.createElement("img");
       image.src = settings.customImage;
       image.alt = "";
       image.draggable = false;
-      toolbarButton.appendChild(image);
+      state.button.appendChild(image);
       return;
     }
 
-    toolbarButton.insertAdjacentHTML(
+    state.button.insertAdjacentHTML(
       "beforeend",
       BUTTON_ICONS[iconName] || BUTTON_ICONS["not-interested"]
     );
   }
 
-  function applyToolbarButtonMetrics() {
-    if (!toolbarButton) return;
+  function applyCardToolbarMetrics(state) {
+    if (!state?.button) return;
 
-    const size = Math.min(
-      56,
-      Math.max(32, Number(settings.buttonSize) || 40)
+    const size = resolvedButtonSize();
+    state.button.style.width = `${size}px`;
+    state.button.style.height = `${size}px`;
+  }
+
+  function applyCardToolbarLabels(state) {
+    if (!state?.button) return;
+
+    state.button.title = state.isLive ? "屏蔽直播博主" : "屏蔽音乐 / 博主 / 标签";
+    state.button.setAttribute(
+      "aria-label",
+      state.isLive ? "屏蔽直播博主" : "屏蔽音乐、博主或标签"
     );
-
-    toolbarButton.style.width = `${size}px`;
-    toolbarButton.style.height = `${size}px`;
   }
 
-  function ensureToolbar() {
-    if (toolbar?.isConnected) return;
-
-    toolbar = document.createElement("div");
-    toolbar.className = "douyin-bgm-filter-toolbar";
-    toolbar.style.display = "none";
-
-    toolbarButton = document.createElement("button");
-    toolbarButton.className = "douyin-bgm-filter-button";
-    toolbarButton.title = "屏蔽音乐 / 博主 / 标签";
-    toolbarButton.setAttribute("aria-label", "屏蔽音乐、博主或标签");
-    toolbarButton.type = "button";
-
-    renderToolbarButtonIcon();
-    applyToolbarButtonMetrics();
-
-    toolbarPanel = document.createElement("div");
-    toolbarPanel.className = "douyin-bgm-filter-panel";
-
-    toolbar.append(toolbarButton, toolbarPanel);
-    document.documentElement.appendChild(toolbar);
-
-    toolbarButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toolbarPanel.classList.toggle("open");
-      renderToolbarPanel();
-    });
-
-    document.addEventListener("click", (event) => {
-      if (!toolbarPanel.classList.contains("open")) return;
-      if (toolbarPanel.contains(event.target)) return;
-      toolbarPanel.classList.remove("open");
-    });
+  // 卡片本来就是定位元素的话什么都不写；只有真是 static 时才补一次，
+  // 并把原值记下来，清理时还原——不在抖音的元素上留痕。
+  function ensureCardPositioned(card) {
+    try {
+      if (getComputedStyle(card).position !== "static") return false;
+    } catch (_) {
+      return false;
+    }
+    card.setAttribute(CARD_POSITION_ATTR, card.style.position || "");
+    card.style.position = "relative";
+    return true;
   }
+
+  function createCardToolbar(card) {
+    const state = {
+      card,
+      root: document.createElement("div"),
+      button: document.createElement("button"),
+      panel: document.createElement("div"),
+      isLive: isLiveContainer(card),
+      open: false,
+      measured: false,
+      metrics: null,
+      wrotePosition: false
+    };
+
+    state.wrotePosition = ensureCardPositioned(card);
+
+    state.root.className = "douyin-bgm-filter-toolbar";
+    state.root.style.display = "none";
+    state.button.className = "douyin-bgm-filter-button";
+    state.button.type = "button";
+    state.panel.className = "douyin-bgm-filter-panel";
+
+    renderCardToolbarIcon(state);
+    applyCardToolbarMetrics(state);
+    applyCardToolbarLabels(state);
+
+    state.root.append(state.button, state.panel);
+
+    // 点击必须挡住，不能冒泡给抖音：卡片自己在监听 click / dblclick / mousedown
+    // 做播放暂停、拖动进度、双击全屏。挂在 <html> 下时没这个问题，进了卡片就必须拦。
+    // 只 stopPropagation，不 preventDefault，否则自己的按钮和选项会失效。
+    for (const type of ["click", "dblclick", "mousedown", "pointerdown"]) {
+      state.root.addEventListener(type, (event) => event.stopPropagation());
+    }
+
+    state.button.addEventListener("click", () => toggleCardPanel(state));
+
+    // 注入到滚动项内部：这样它和视频共享同一个合成器滚动，滚动时无需任何 JS。
+    card.appendChild(state.root);
+    return state;
+  }
+
+  function disposeCardToolbar(state) {
+    if (!state) return;
+
+    closeCardPanel(state);
+    if (activeToolbar === state) activeToolbar = null;
+    state.root?.remove();
+
+    if (state.wrotePosition && state.card?.isConnected) {
+      state.card.style.position = state.card.getAttribute(CARD_POSITION_ATTR) || "";
+      state.card.removeAttribute(CARD_POSITION_ATTR);
+    }
+
+    cardToolbars.delete(state);
+  }
+
+  function disposeAllCardToolbars() {
+    for (const state of [...cardToolbars]) disposeCardToolbar(state);
+  }
+
+  function toggleCardPanel(state) {
+    if (state?.panel.classList.contains("open")) closeCardPanel(state);
+    else openCardPanel(state);
+  }
+
+  function openCardPanel(state) {
+    if (!state) return;
+    if (openToolbar && openToolbar !== state) closeCardPanel(openToolbar);
+    state.open = true;
+    openToolbar = state;
+    state.panel.classList.add("open");
+    positionCardPanel(state);
+    renderToolbarPanel(state);
+  }
+
+  function closeCardPanel(state) {
+    if (!state) return;
+    state.open = false;
+    state.panel?.classList.remove("open");
+    if (openToolbar === state) openToolbar = null;
+  }
+
+  // 面板开在按钮上方还是下方，点开这一刻判断一次就够：
+  // 开面板时视频是静止的，滑动切视频时面板本来就会关掉。
+  function positionCardPanel(state) {
+    const rect = state.button.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    state.panel.classList.toggle("above", spaceBelow < 320 && rect.top > 320);
+  }
+
+  // 全局只注册一次（放进每卡片工厂里会按卡片数泄漏 document 监听）。
+  document.addEventListener("click", (event) => {
+    if (!openToolbar) return;
+    if (openToolbar.root.contains(event.target)) return;
+    closeCardPanel(openToolbar);
+  });
 
   function createRow(label) {
     const row = document.createElement("div");
@@ -704,11 +842,8 @@
     const active = findActiveContainer();
     const node = active?.closest(LIVE_CONTAINER_SELECTOR) || active;
     if (!isLiveContainer(node)) return null;
-    // Resolve against the actual active container, not a preloaded neighbour.
-    const previous = activeContainer;
-    activeContainer = node;
-    const entry = findBestLiveEntryForActiveContainer();
-    activeContainer = previous;
+    // 对着真正的当前卡片解析，而不是预加载的邻卡。
+    const entry = findBestLiveEntryForCard(node);
     return { container: node, identity: liveIdentity(entry), entry };
   }
 
@@ -741,24 +876,25 @@
     document.dispatchEvent(event);
   }
 
-  function renderToolbarPanel() {
-    if (!toolbarPanel || !toolbarPanel.classList.contains("open")) return;
+  function renderToolbarPanel(state) {
+    if (!state?.panel || !state.panel.classList.contains("open")) return;
 
-    const isLive = isLiveContainer(activeContainer);
+    const isLive = state.isLive;
 
     // 先尝试补数据，再取当前可用的条目：本地 SSR 解析是同步的，
     // 这样第一次点开面板就能显示内容，不用等第二次点击。
-    if (!isLive) requestEntryForActiveContainer();
+    // 只认这张卡片自己的数据，不拿相邻卡片兜底。
+    if (!isLive) requestEntryForCard(state.card);
     const entry =
       (isLive
-        ? findBestLiveEntryForActiveContainer()
-        : findBestEntryForActiveContainer()) || {};
-    toolbarPanel.textContent = "";
+        ? findBestLiveEntryForCard(state.card)
+        : findBestEntryForCard(state.card)) || {};
+    state.panel.textContent = "";
 
     const title = document.createElement("div");
     title.className = "douyin-bgm-filter-panel-title";
     title.textContent = isLive ? "选择要屏蔽的博主" : "选择要屏蔽的内容";
-    toolbarPanel.appendChild(title);
+    state.panel.appendChild(title);
 
     if (
       !entry.awemeId &&
@@ -772,7 +908,7 @@
       note.textContent = isLive
         ? "当前直播博主数据还未识别到，可稍后重试。"
         : "当前视频数据还未识别到，可稍后重试。";
-      toolbarPanel.appendChild(note);
+      state.panel.appendChild(note);
     }
 
     const authorRow = createRow("博主");
@@ -841,32 +977,32 @@
     blockButton.disabled = true;
 
     const updateBlockButton = () => {
-      blockButton.disabled = !toolbarPanel.querySelector(
+      blockButton.disabled = !state.panel.querySelector(
         ".douyin-bgm-filter-chip input:checked"
       );
     };
 
-    toolbarPanel.onchange = updateBlockButton;
+    state.panel.onchange = updateBlockButton;
     cancelButton.addEventListener("click", (event) => {
       event.stopPropagation();
-      toolbarPanel.classList.remove("open");
+      closeCardPanel(state);
     });
 
     blockButton.addEventListener("click", (event) => {
       event.stopPropagation();
       const rules = Array.from(
-        toolbarPanel.querySelectorAll(".douyin-bgm-filter-chip input:checked")
+        state.panel.querySelectorAll(".douyin-bgm-filter-chip input:checked")
       )
         .map((input) => input.__douyinBgmFilterRule)
         .filter(Boolean);
 
       const liveTarget = isLive ? currentLiveTarget() : null;
       saveBlockedRules(rules, { liveTarget });
-      toolbarPanel.classList.remove("open");
+      closeCardPanel(state);
     });
 
     actions.append(cancelButton, blockButton);
-    toolbarPanel.append(...rows, actions);
+    state.panel.append(...rows, actions);
     updateBlockButton();
   }
 
@@ -891,8 +1027,13 @@
           storage.remove("recent", () => {});
         } catch (_) {}
 
-        renderToolbarButtonIcon();
-        applyToolbarButtonMetrics();
+        // 按钮尺寸变了会让 X 偏移跟着变，所以套用尺寸后要作废缓存、重新量一次。
+        for (const state of cardToolbars) {
+          renderCardToolbarIcon(state);
+          applyCardToolbarMetrics(state);
+          state.measured = false;
+          state.metrics = null;
+        }
         postSettingsToMain();
         updateToolbarPosition();
       });
@@ -1116,11 +1257,11 @@
     return "";
   }
 
-  function findBestLiveEntryForActiveContainer() {
-    if (!activeContainer || !isLiveContainer(activeContainer)) return null;
+  function findBestLiveEntryForCard(card) {
+    if (!card || !isLiveContainer(card)) return null;
 
-    const roomId = findLiveRoomIdForContainer(activeContainer);
-    const text = normalizedText(activeContainer.textContent || "");
+    const roomId = findLiveRoomIdForContainer(card);
+    const text = normalizedText(card.textContent || "");
     let bestEntry = null;
     let bestScore = 0;
     const pageKey = `${window.location.pathname}${window.location.search}`;
@@ -1143,27 +1284,26 @@
 
     if (bestEntry) return bestEntry;
     // The current anchor may be visible before its room response arrives.
-    const anchor = Array.from(activeContainer.querySelectorAll?.('a[href*="/user/"]') || []).find((link) => String(link.textContent || "").trim());
+    const anchor = Array.from(card.querySelectorAll?.('a[href*="/user/"]') || []).find((link) => String(link.textContent || "").trim());
     const author = String(anchor?.textContent || "").trim().replace(/^@/, "");
     const authorId = anchor?.getAttribute?.("href")?.match(/\/user\/([^/?#]+)/)?.[1] || "";
     return author ? { isLive: true, roomId, author, authorId, tags: [] } : null;
   }
 
-  function findBestEntryForActiveContainer() {
-    if (!activeContainer) return null;
-    if (isLiveContainer(activeContainer)) return null;
+  function findBestEntryForCard(card) {
+    if (!card) return null;
+    if (isLiveContainer(card)) return null;
 
-    const containerId = findContainerAwemeId(activeContainer);
+    const containerId = findContainerAwemeId(card);
 
     if (containerId && knownEntries.has(containerId)) {
       return knownEntries.get(containerId);
     }
 
     const textRoot =
-      activeContainer.matches?.('[data-e2e="feed-active-video"]')
-        ? activeContainer
-        : activeContainer.querySelector?.('[data-e2e="feed-active-video"]') ||
-          activeContainer;
+      card.matches?.('[data-e2e="feed-active-video"]')
+        ? card
+        : card.querySelector?.('[data-e2e="feed-active-video"]') || card;
     const text = normalizedText(nonLiveContainerText(textRoot));
     let bestEntry = null;
     let bestScore = 0;
@@ -1232,15 +1372,14 @@
       });
     }
 
-    // updateToolbarPosition() 在切换到新的视频容器时会把面板收起来，
-    // 所以这里先记住面板状态，再把新数据渲染回去，避免刚拿到数据面板就没了。
-    const keepPanelOpen = Boolean(toolbarPanel?.classList.contains("open"));
+    // 新数据到了：重新对一遍卡片（可能有新卡片进场），并把还开着的面板按最新数据重绘。
+    // 位置不依赖 entry，所以这条路径基本是空转，只有面板内容需要刷。
+    const reopen = openToolbar;
 
     updateToolbarPosition();
 
-    if (keepPanelOpen) {
-      toolbarPanel?.classList.add("open");
-      renderToolbarPanel();
+    if (reopen && openToolbar === reopen) {
+      renderToolbarPanel(reopen);
     }
   }
 
@@ -1411,8 +1550,8 @@ function extractLocalSsrEntry(awemeId) {
   return null;
 }
 
-function requestEntryForActiveContainer() {
-  let containerId = findContainerAwemeId(activeContainer);
+function requestEntryForCard(card) {
+  let containerId = findContainerAwemeId(card);
   let idSource = containerId ? "dom" : "";
   if (!containerId) {
     try {
@@ -1465,80 +1604,216 @@ function requestEntryForActiveContainer() {
   } catch (_) {}
 }
 
-function updateToolbarPosition() {
-  if (!settings.enabled) {
-    if (toolbar) toolbar.style.display = "none";
-    return;
+// 普通卡片必须有自身的视频；直播以独立直播节点为准，也支持没有 video 的预览。
+// 普通视频里的直播缩略图不再独立注入按钮。
+function findCards() {
+  const found = [];
+  let nodes;
+  try {
+    nodes = document.querySelectorAll(CARD_SELECTOR);
+  } catch (_) {
+    return found;
   }
 
-  ensureToolbar();
-  activeContainer = findActiveContainer();
-  const isLive = isLiveContainer(activeContainer);
-  toolbarButton.title = isLive ? "屏蔽直播博主" : "屏蔽音乐 / 博主 / 标签";
-  toolbarButton.setAttribute(
-    "aria-label",
-    isLive ? "屏蔽直播博主" : "屏蔽音乐、博主或标签"
+  for (const node of nodes) {
+    const isLive = isLiveContainer(node);
+    const videos = Array.from(node.querySelectorAll?.("video") || []);
+    if (!isLive && !videos.some((video) => !isLiveContainer(video))) continue;
+    if (found.some((outer) => outer.contains(node))) continue;
+    found.push(node);
+  }
+  return found;
+}
+
+function findCardToolbar(card) {
+  if (!card) return null;
+  for (const state of cardToolbars) {
+    if (state.card === card) return state;
+  }
+  return null;
+}
+
+// findActiveContainer() 可能给出内层节点（例如 slide-list-item 里的 feed-active-video），
+// 而我们注入的是外层卡片。只按相等匹配会让"正在看的卡片"认不出来，
+// 面板一打开就被误判成换了卡片而关掉。候选卡片已去重为最外层，所以 contains 不会串台。
+function toolbarForNode(node) {
+  if (!node) return null;
+  for (const state of cardToolbars) {
+    if (state.card === node || state.card.contains(node)) return state;
+  }
+  return null;
+}
+
+function largestVideoRect(card, includeLive) {
+  const videos = Array.from(card.querySelectorAll?.("video") || []).filter(
+    (video) => includeLive || !isLiveContainer(video)
   );
-
-  if (activeContainer !== lastToolbarContainer) {
-    lastToolbarContainer = activeContainer;
-    toolbarPanel?.classList.remove("open");
-  }
-
-  if (!activeContainer) {
-    toolbar.style.display = "none";
-    return;
-  }
-
-  const rect = activeContainer.getBoundingClientRect();
-  if (!rect.width || !rect.height) {
-    toolbar.style.display = "none";
-    return;
-  }
-
-  let targetRect = rect;
-  const videos = Array.from(activeContainer.querySelectorAll?.("video") || []).filter(
-    (video) => isLive || !isLiveContainer(video)
-  );
-  let largestVideo = null;
-  let largestArea = 0;
+  let best = null;
+  let bestArea = 0;
 
   for (const video of videos) {
-    const videoRect = video.getBoundingClientRect();
-    const area = videoRect.width * videoRect.height;
-    if (area > largestArea) {
-      largestArea = area;
-      largestVideo = videoRect;
+    const rect = video.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area > bestArea) {
+      bestArea = area;
+      best = rect;
     }
   }
 
-  if (largestVideo?.width && largestVideo?.height) {
-    targetRect = largestVideo;
+  return best?.width && best?.height ? best : null;
+}
+
+// getBoundingClientRect 给的是变换后的视口坐标，而 absolute 的 top/left 在卡片的
+// 局部坐标系里解析。卡片带 transform: scale() 时两者差一个系数，必须除掉。
+function cardTransformScale(card) {
+  try {
+    const transform = getComputedStyle(card).transform;
+    if (!transform || transform === "none") return { x: 1, y: 1 };
+    const matrix = new DOMMatrixReadOnly(transform);
+    return { x: matrix.a || 1, y: matrix.d || 1 };
+  } catch (_) {
+    return { x: 1, y: 1 };
+  }
+}
+
+const CARD_MEASURE_RETRIES = 5;
+
+// 卡片内偏移量与滚动无关，所以每张卡片量一次就够了——
+// 这是本次改动的全部意义：scroll 上不再有任何扩展代码。
+function repositionCardToolbar(state, retries = CARD_MEASURE_RETRIES) {
+  const card = state?.card;
+  if (!card?.isConnected) return;
+
+  const cardRect = card.getBoundingClientRect();
+  if (!cardRect.width || !cardRect.height) {
+    // 还没排版。宁可不出现，也别先出现在错位置再跳（0.5.23 的教训）。
+    state.root.style.display = "none";
+    state.measured = false;
+    if (retries > 0) {
+      requestAnimationFrame(() => repositionCardToolbar(state, retries - 1));
+    }
+    return;
   }
 
-  // 用设置里的尺寸，而不是去量刚创建、可能还没渲染完的按钮，
-  // 否则第一次会用默认值算位置，等量到真实宽度后又挪一下。
-  const buttonSize = Math.max(32, Number(settings.buttonSize) || 40);
+  const targetRect = largestVideoRect(card, state.isLive) || cardRect;
+  const rail = findRailForTarget(card, targetRect);
+  const anchorCenterX = rail
+    ? rail.rect.right - (rail.paddingRight + RAIL_COLUMN_WIDTH / 2) * rail.scale
+    : targetRect.right - RAIL_CENTER_INSET_FALLBACK;
 
-  toolbar.style.position = "fixed";
-  toolbar.style.top = `${Math.max(10, targetRect.top + 10)}px`;
-  toolbar.style.width = "";
-  toolbar.style.height = "";
-  toolbar.style.margin = "";
+  const scale = cardTransformScale(card);
+  const size = resolvedButtonSize();
+  const metrics = {
+    top: Math.max(10, Math.round((targetRect.top - cardRect.top) / scale.y + 10)),
+    left: Math.max(8, Math.round((anchorCenterX - cardRect.left) / scale.x - size / 2)),
+    w: Math.round(cardRect.width),
+    h: Math.round(cardRect.height)
+  };
 
-  // X 轴按抖音自己的布局规则算，不查询点赞图标本身。
-  const anchorCenterX = computeRailCenterX(activeContainer, targetRect);
-  toolbar.style.left = `${Math.max(8, anchorCenterX - buttonSize / 2)}px`;
-  toolbar.style.right = "auto";
-  toolbar.style.display = "block";
+  const previous = state.metrics;
+  const unchanged =
+    previous &&
+    previous.top === metrics.top &&
+    previous.left === metrics.left &&
+    previous.w === metrics.w &&
+    previous.h === metrics.h;
 
-  reportAnchorDrift(activeContainer, anchorCenterX, targetRect);
+  if (!unchanged) {
+    state.root.style.top = `${metrics.top}px`;
+    state.root.style.left = `${metrics.left}px`;
+  }
+  state.root.style.display = "block";
+  state.metrics = metrics;
 
-  const spaceBelow = window.innerHeight - targetRect.bottom;
-  toolbarPanel.classList.toggle(
-    "above",
-    spaceBelow < 320 && targetRect.top > 320
-  );
+  // 操作栏比按钮晚渲染时，先用兜底几何（±2px）把按钮显示出来，
+  // 下一帧找到真实容器再静默修正——修正幅度小于肉眼可辨的跳动。
+  if (!rail && retries > 0) {
+    requestAnimationFrame(() => repositionCardToolbar(state, retries - 1));
+    return;
+  }
+
+  if (!state.measured) {
+    state.measured = true;
+    reportAnchorDrift(card, anchorCenterX, targetRect);
+    logEvent("info", "卡片内工具栏已定位", {
+      cardDataE2e: card.getAttribute?.("data-e2e") || "",
+      cardPosition: getComputedStyle(card).position,
+      wrotePosition: state.wrotePosition,
+      cardW: metrics.w,
+      cardH: metrics.h,
+      target: targetRect === cardRect ? "card" : "video",
+      railFound: Boolean(rail),
+      railPaddingRight: rail?.paddingRight ?? null,
+      railScale: rail?.scale ?? null,
+      buttonSize: size,
+      top: metrics.top,
+      left: metrics.left
+    });
+  }
+}
+
+// 补齐/清理卡片按钮。幂等：状态没变时不写任何 DOM。
+function toolbarAllowedOnPage() {
+  return !/^\/follow(?:\/|$)/.test(window.location.pathname);
+}
+
+function reconcileCardToolbar() {
+  if (!settings.enabled || !toolbarAllowedOnPage()) {
+    disposeAllCardToolbars();
+    return;
+  }
+
+  activeContainer = findActiveContainer();
+  const cards = findCards();
+
+  if (!cards.length) {
+    disposeAllCardToolbars();
+    return;
+  }
+
+  const wanted = new Set(cards);
+  for (const state of [...cardToolbars]) {
+    if (!wanted.has(state.card) || !state.card.isConnected) disposeCardToolbar(state);
+  }
+
+  for (const card of cards) {
+    const state = findCardToolbar(card);
+
+    if (!state) {
+      const created = createCardToolbar(card);
+      cardToolbars.add(created);
+      repositionCardToolbar(created);
+      continue;
+    }
+
+    // 被页面重渲染摘掉了：补回去，重量一次。
+    if (state.root.parentNode !== card) {
+      ensureCardPositioned(card);
+      card.appendChild(state.root);
+      state.measured = false;
+      state.metrics = null;
+      repositionCardToolbar(state);
+      continue;
+    }
+
+    const isLive = isLiveContainer(card);
+    if (state.isLive !== isLive) {
+      state.isLive = isLive;
+      applyCardToolbarLabels(state);
+      closeCardPanel(state);
+      repositionCardToolbar(state);
+      continue;
+    }
+
+    if (!state.measured) repositionCardToolbar(state);
+  }
+
+  activeToolbar = toolbarForNode(activeContainer);
+  if (openToolbar && openToolbar !== activeToolbar) closeCardPanel(openToolbar);
+}
+
+function updateToolbarPosition() {
+  reconcileCardToolbar();
 }
 
 function scheduleToolbarPosition() {
@@ -1546,18 +1821,15 @@ function scheduleToolbarPosition() {
     toolbarPositionTimer = setTimeout(updateToolbarPosition, 150);
   }
 
-  // 按抖音操作栏容器自己的盒模型算出图标中心 X：
-  //   容器右边缘 −（内边距 + 列宽/2）× 缩放
-  // 这样换窗口大小、换视频都一致，也不需要去看点赞图标在哪。
-  function computeRailCenterX(container, targetRect) {
-    const fallback = targetRect.right - RAIL_CENTER_INSET_FALLBACK;
-
+  // 找出与目标视频重叠最多的操作栏容器，并读出它自己的盒模型参数。
+  // 预加载的下一个视频也可能有同样的容器，所以按重叠量挑，不能取第一个。
+  // 返回 null 表示没找到——调用方据此判断这次测量是不是可信的。
+  function findRailForTarget(container, targetRect) {
     try {
       const rails = container?.querySelectorAll?.(RAIL_SELECTOR);
-      if (!rails?.length) return fallback;
+      if (!rails?.length) return null;
 
-      // 预加载的下一个视频也可能有同样的容器，取和当前视频重叠最多的那个。
-      let rail = null;
+      let best = null;
       let bestOverlap = -1;
       for (const candidate of rails) {
         const rect = candidate.getBoundingClientRect();
@@ -1566,20 +1838,31 @@ function scheduleToolbarPosition() {
           Math.min(rect.bottom, targetRect.bottom) - Math.max(rect.top, targetRect.top);
         if (overlap > bestOverlap) {
           bestOverlap = overlap;
-          rail = { element: candidate, rect };
+          best = { element: candidate, rect };
         }
       }
-      if (!rail) return fallback;
+      if (!best) return null;
 
-      const style = getComputedStyle(rail.element);
-      const paddingRight = parseFloat(style.paddingRight) || 0;
+      const style = getComputedStyle(best.element);
       const matrix = /matrix\(([-\d.]+)/.exec(style.transform || "");
-      const scale = matrix ? Number(matrix[1]) || 1 : 1;
-
-      return rail.rect.right - (paddingRight + RAIL_COLUMN_WIDTH / 2) * scale;
+      return {
+        rect: best.rect,
+        paddingRight: parseFloat(style.paddingRight) || 0,
+        scale: matrix ? Number(matrix[1]) || 1 : 1
+      };
     } catch (_) {
-      return fallback;
+      return null;
     }
+  }
+
+  // 按抖音操作栏容器自己的盒模型算出图标中心 X：
+  //   容器右边缘 −（内边距 + 列宽/2）× 缩放
+  // 这样换窗口大小、换视频都一致，也不需要去看点赞图标在哪。
+  // 返回视口坐标；卡片内定位再减去卡片左边缘。
+  function computeRailCenterX(container, targetRect) {
+    const rail = findRailForTarget(container, targetRect);
+    if (!rail) return targetRect.right - RAIL_CENTER_INSET_FALLBACK;
+    return rail.rect.right - (rail.paddingRight + RAIL_COLUMN_WIDTH / 2) * rail.scale;
   }
 
   // 只做诊断：我们不再用点赞图标定位，但如果算出来的 X 和真实图标中心差得多，
@@ -1636,8 +1919,27 @@ function scheduleToolbarPosition() {
   });
   } catch (_) {}
 
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((records) => {
     if (!settings.enabled) return;
+
+    // 我们自己往卡片里插按钮也会触发 childList，必须滤掉，否则会自激。
+    // 只判断 record.target.closest 不够：追加工具栏时 target 是卡片本身，不在工具栏内，
+    // 所以还要看 addedNodes 是不是清一色的工具栏节点。
+    const onlySelf = records.every((record) => {
+      if (record.target instanceof Element && record.target.closest?.(".douyin-bgm-filter-toolbar")) {
+        return true;
+      }
+      return (
+        record.addedNodes.length > 0 &&
+        Array.from(record.addedNodes).every(
+          (node) =>
+            node instanceof Element &&
+            node.classList?.contains("douyin-bgm-filter-toolbar")
+        )
+      );
+    });
+    if (onlySelf) return;
+
     scheduleToolbarPosition();
   });
 
@@ -1649,7 +1951,6 @@ function scheduleToolbarPosition() {
   }
 
   injectStyle();
-  ensureToolbar();
   loadSettings();
   loadBlockedHistory();
   startObserver();
@@ -1657,11 +1958,14 @@ function scheduleToolbarPosition() {
   logEvent("info", "扩展在页面上启动", {
     version: chrome?.runtime?.getManifest?.().version || "",
     scriptsAtStart: document.scripts.length,
-    toolbar: Boolean(toolbar)
+    toolbarMode: "card"
   });
 
-  window.addEventListener("scroll", updateToolbarPosition, { passive: true });
+  // 没有 scroll 监听：按钮长在卡片里，滚动由浏览器负责，扩展不参与。
   window.addEventListener("resize", updateToolbarPosition);
   window.addEventListener("fullscreenchange", updateToolbarPosition);
+  window.addEventListener("popstate", updateToolbarPosition);
+  window.addEventListener("pageshow", updateToolbarPosition);
+  window.navigation?.addEventListener("currententrychange", updateToolbarPosition);
 })();
 
