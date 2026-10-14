@@ -661,6 +661,9 @@
       open: false,
       measured: false,
       metrics: null,
+      layoutObserver: null,
+      layoutNodes: new Set(),
+      layoutFrame: null,
       wrotePosition: false
     };
 
@@ -689,6 +692,10 @@
 
     // 注入到滚动项内部：这样它和视频共享同一个合成器滚动，滚动时无需任何 JS。
     card.appendChild(state.root);
+    if (typeof ResizeObserver === "function") {
+      state.layoutObserver = new ResizeObserver(() => scheduleCardLayout(state));
+    }
+    observeCardLayout(state);
     return state;
   }
 
@@ -696,6 +703,9 @@
     if (!state) return;
 
     closeCardPanel(state);
+    state.layoutObserver?.disconnect();
+    if (state.layoutFrame !== null) cancelAnimationFrame(state.layoutFrame);
+    state.layoutNodes.clear();
     if (activeToolbar === state) activeToolbar = null;
     state.root?.remove();
 
@@ -787,7 +797,7 @@
     return chip;
   }
 
-  function saveBlockedRules(rules, { liveTarget = null } = {}) {
+  function saveBlockedRules(rules, { liveTarget = null, isLive = false } = {}) {
     const cleanRules = (rules || []).filter(Boolean);
     if (!cleanRules.length) return;
 
@@ -824,8 +834,10 @@
           return;
         }
         postSettingsToMain();
-        if (liveTarget) liveActions.run(liveTarget);
-        else sendNativeNotInterested();
+        if (isLive) {
+          if (liveTarget) liveActions.run(liveTarget);
+          else showLiveNotice("规则已保存，当前直播已切换，请在当前直播卡片上重试。");
+        } else sendNativeNotInterested();
       });
     } catch (error) {
       settings.blocked = previousBlocked;
@@ -996,8 +1008,9 @@
         .map((input) => input.__douyinBgmFilterRule)
         .filter(Boolean);
 
-      const liveTarget = isLive ? currentLiveTarget() : null;
-      saveBlockedRules(rules, { liveTarget });
+      const current = isLive ? currentLiveTarget() : null;
+      const liveTarget = current?.container === state.card ? current : null;
+      saveBlockedRules(rules, { liveTarget, isLive });
       closeCardPanel(state);
     });
 
@@ -1112,15 +1125,9 @@
   function isLikelyActive(node) {
     if (!node?.isConnected) return false;
 
-    if (
-      node.matches?.('[data-e2e="feed-active-video"]') ||
-      node.querySelector?.('[data-e2e="feed-active-video"]')
-    ) {
-      return true;
-    }
-
     const rect = node.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
+    if (rect.bottom <= 0 || rect.top >= window.innerHeight) return false;
 
     const itemCenter = rect.top + rect.height / 2;
     const viewportCenter = window.innerHeight / 2;
@@ -1142,8 +1149,9 @@
     ];
 
     for (const selector of selectors) {
-      const node = document.querySelector(selector);
-      if (node) return node;
+      for (const node of document.querySelectorAll(selector)) {
+        if (isLikelyActive(node)) return node;
+      }
     }
 
     const liveNodes = document.querySelectorAll?.(
@@ -1678,8 +1686,37 @@ function cardTransformScale(card) {
 
 const CARD_MEASURE_RETRIES = 5;
 
-// 卡片内偏移量与滚动无关，所以每张卡片量一次就够了——
-// 这是本次改动的全部意义：scroll 上不再有任何扩展代码。
+// 只响应实际布局变化，不在 update / scroll 或常驻帧循环里跟踪坐标。
+// 评论展开可能只改变视频或操作栏的容器，外层卡片尺寸保持不变。
+function observeCardLayout(state) {
+  if (!state.layoutObserver) return;
+  const nodes = new Set([state.card]);
+  for (const target of state.card.querySelectorAll(`video, ${RAIL_SELECTOR}`)) {
+    for (let node = target; node && node !== state.card; node = node.parentElement) {
+      nodes.add(node);
+    }
+  }
+  for (const node of state.layoutNodes) {
+    if (!nodes.has(node)) state.layoutObserver.unobserve(node);
+  }
+  for (const node of nodes) {
+    if (!state.layoutNodes.has(node)) state.layoutObserver.observe(node);
+  }
+  state.layoutNodes = nodes;
+}
+
+function scheduleCardLayout(state) {
+  if (!state.card.isConnected || !cardToolbars.has(state)) return;
+  if (state.layoutFrame !== null) return;
+  state.layoutFrame = requestAnimationFrame(() => {
+    state.layoutFrame = null;
+    if (!state.card.isConnected || !cardToolbars.has(state)) return;
+    repositionCardToolbar(state);
+    if (state.open) positionCardPanel(state);
+  });
+}
+
+// 卡片内偏移量与滚动无关；初次排版、尺寸变化和布局动画结束时才重算。
 function repositionCardToolbar(state, retries = CARD_MEASURE_RETRIES) {
   const card = state?.card;
   if (!card?.isConnected) return;
@@ -1786,6 +1823,9 @@ function reconcileCardToolbar() {
       continue;
     }
 
+    // 评论或播放器重渲染时重新绑定目标，同时释放被替换的节点。
+    observeCardLayout(state);
+
     // 被页面重渲染摘掉了：补回去，重量一次。
     if (state.root.parentNode !== card) {
       ensureCardPositioned(card);
@@ -1814,6 +1854,11 @@ function reconcileCardToolbar() {
 
 function updateToolbarPosition() {
   reconcileCardToolbar();
+}
+
+function refreshToolbarLayout() {
+  reconcileCardToolbar();
+  for (const state of cardToolbars) scheduleCardLayout(state);
 }
 
 function scheduleToolbarPosition() {
@@ -1962,8 +2007,18 @@ function scheduleToolbarPosition() {
   });
 
   // 没有 scroll 监听：按钮长在卡片里，滚动由浏览器负责，扩展不参与。
-  window.addEventListener("resize", updateToolbarPosition);
-  window.addEventListener("fullscreenchange", updateToolbarPosition);
+  window.addEventListener("resize", refreshToolbarLayout);
+  document.addEventListener("fullscreenchange", refreshToolbarLayout);
+  // transform / 位移动画不会触发 ResizeObserver，跟随页面动画结束修正最终位置。
+  for (const type of ["transitionend", "transitioncancel", "animationend", "animationcancel"]) {
+    document.addEventListener(type, (event) => {
+      const target = event.target;
+      if (!(target instanceof Element) || target.closest(".douyin-bgm-filter-toolbar")) return;
+      for (const state of cardToolbars) {
+        if (state.layoutNodes.has(target) || target.contains(state.card)) scheduleCardLayout(state);
+      }
+    }, true);
+  }
   window.addEventListener("popstate", updateToolbarPosition);
   window.addEventListener("pageshow", updateToolbarPosition);
   window.navigation?.addEventListener("currententrychange", updateToolbarPosition);

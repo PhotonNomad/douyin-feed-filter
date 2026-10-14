@@ -135,6 +135,24 @@
     };
   }
 
+  // Type 101 recommendations carry the room in cell_room.rawdata (often JSON).
+  // Restrict this decoding to live feed items: video authors also have room data.
+  const feedLiveRooms = new WeakMap();
+  function feedLiveRoom(node) {
+    if (!node || typeof node !== "object" ||
+        Number(node.aweme_type ?? node.awemeType) !== 101) return null;
+    if (feedLiveRooms.has(node)) return feedLiveRooms.get(node);
+    const cell = node.cell_room || node.cellRoom;
+    let room = cell?.rawdata;
+    if (typeof room === "string") {
+      try { room = room.length <= MAX_BODY_BYTES ? JSON.parse(room) : null; }
+      catch (_) { room = null; }
+    }
+    room = room && typeof room === "object" && !Array.isArray(room) ? room : null;
+    feedLiveRooms.set(node, room);
+    return room;
+  }
+
   function extractLiveRoomAuthor(node) {
     const rooms = [
       node.room,
@@ -145,9 +163,11 @@
       node.live_room,
       node.liveRoom,
       node.webcast_room,
-      node.webcastRoom
+      node.webcastRoom,
+      feedLiveRoom(node)
     ].filter((value) => value && typeof value === "object");
     const owners = [
+      feedLiveRoom(node)?.owner,
       node.owner,
       node.owner_info,
       node.ownerInfo,
@@ -215,6 +235,7 @@
     if (!owner.nickname && !owner.id) return null;
 
     const room = [
+      feedLiveRoom(node),
       node.room,
       node.room_info,
       node.roomInfo,
@@ -244,6 +265,7 @@
         room.roomId,
         room.web_rid,
         room.webRid,
+        room.id_str,
         room.id
       ),
       author: owner.nickname,
@@ -261,6 +283,7 @@
 
   function isLiveNode(node) {
     if (!node || typeof node !== "object") return false;
+    if (feedLiveRoom(node)) return true;
 
     const room =
       node.room ||
@@ -320,6 +343,7 @@
 
   function isLiveOnlyNode(node) {
     if (!node || typeof node !== "object" || !isLiveNode(node)) return false;
+    if (feedLiveRoom(node)) return true;
 
     const explicitAwemeId = firstString(
       node.aweme_id,
