@@ -1791,7 +1791,9 @@ function repositionCardToolbar(state, retries = CARD_MEASURE_RETRIES) {
 
 // 补齐/清理卡片按钮。幂等：状态没变时不写任何 DOM。
 function toolbarAllowedOnPage() {
-  return !/^\/follow(?:\/|$)/.test(window.location.pathname);
+  // 只在推荐和精选首页显示，搜索、个人主页及独立详情页均不注入。
+  const { hostname, pathname } = window.location;
+  return hostname === "www.douyin.com" && /^(?:\/|\/jingxuan\/?)$/.test(pathname);
 }
 
 function reconcileCardToolbar() {
