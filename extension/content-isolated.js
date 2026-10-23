@@ -61,6 +61,10 @@
   ].join(",");
   const requestedEntries = new Set();
   let lastRequestedAwemeId = "";
+  // 已经替用户跳过（或用户刚用按钮屏蔽）的视频：每个只处理一次，往回翻时不再强制跳走。
+  const skippedAwemeIds = new Set();
+  // 兜底跳过只为每个视频主动查一次数据，查不到也不随每次 DOM 变化重复查。
+  const skipLookupIds = new Set();
 
   // ---- 诊断日志 -----------------------------------------------------------
   // 只保存在浏览器本地。环形缓冲，最多 300 条，写入做了节流，
@@ -837,7 +841,12 @@
         if (isLive) {
           if (liveTarget) liveActions.run(liveTarget);
           else showLiveNotice("规则已保存，当前直播已切换，请在当前直播卡片上重试。");
-        } else sendNativeNotInterested();
+        } else {
+          // 「不感兴趣」本身会切走，别让兜底跳过再多跳一个。
+          const activeId = findContainerAwemeId(findActiveContainer());
+          if (activeId) skippedAwemeIds.add(activeId);
+          sendNativeNotInterested();
+        }
       });
     } catch (error) {
       settings.blocked = previousBlocked;
@@ -886,6 +895,96 @@
     });
 
     document.dispatchEvent(event);
+  }
+
+  // 测试用的隐藏开关：页面里 postMessage({source: TEST_MESSAGE_SOURCE, type: "skip-all", enabled})
+  // 打开后推荐页所有普通视频都走一遍自动跳过。只在内存里、只管当前标签页，刷新即失效。
+  const TEST_MESSAGE_SOURCE = "douyin-bgm-filter/test";
+  const TEST_SKIP_ALL_RULE = { key: "test:skip-all", kind: "test", label: "测试：跳过所有视频" };
+  let testSkipAll = false;
+
+  // 兜底：从关注/直播切回推荐时，抖音直接复用内存里的旧列表，不发推荐请求，
+  // 数据层没有机会过滤。这里按当前视频的确切 id 对规则，命中就切到下一条。
+  function skipBlockedActiveVideo(active) {
+    if (!active || isLiveContainer(active) || window.location.pathname !== "/") return;
+
+    const awemeId = findContainerAwemeId(active);
+    if (!awemeId || skippedAwemeIds.has(awemeId)) return;
+
+    const testing = testSkipAll;
+    const entry = knownEntries.get(awemeId);
+    if (!entry && !testing) {
+      // 数据到了会经 handleEntry 再走一遍 reconcile。
+      if (!skipLookupIds.has(awemeId)) {
+        if (skipLookupIds.size > 500) skipLookupIds.clear();
+        skipLookupIds.add(awemeId);
+        requestEntryForCard(active);
+      }
+      return;
+    }
+
+    const rule = testing ? TEST_SKIP_ALL_RULE : matchEntry(entry);
+    if (!rule || !isAwemeStillActive(awemeId)) return;
+
+    skippedAwemeIds.add(awemeId);
+    logEvent("info", "当前视频命中规则，自动跳过", {
+      awemeId,
+      rule: rule.label,
+      ruleKind: rule.kind
+    });
+    pressNextUntilLeft(awemeId);
+    // 测试跳过不是真的屏蔽，不写屏蔽历史。
+    if (testing) return;
+    saveBlockedRecord({
+      awemeId,
+      author: entry.author || "",
+      authorId: entry.authorId || "",
+      title: entry.title || "",
+      videoTitle: entry.videoTitle || "",
+      musicId: entry.musicId || "",
+      ruleKey: rule.key || "",
+      ruleLabel: rule.label || "",
+      ruleKind: rule.kind || "",
+      blockedAt: Date.now()
+    });
+  }
+
+  // 整页加载时首个视频来自 SSR，推荐接口的后续数据还没到，此时按下键没有下一条可切。
+  // 所以按完要确认真的切走了，没切走就隔一会儿再按。
+  const SKIP_RETRY_INTERVAL_MS = 800;
+  const SKIP_MAX_ATTEMPTS = 10;
+
+  // 只认这个视频自己的播放节点。不能用 findActiveContainer()：切到直播时它认不出直播，
+  // 会退回到离中心最近的旧卡片，误判成「没切走」而把直播也连带跳过。
+  function isAwemeStillActive(awemeId) {
+    for (const node of document.querySelectorAll('[data-e2e="feed-active-video"]')) {
+      if (node.getAttribute("data-e2e-vid") === awemeId && isLikelyActive(node)) return true;
+    }
+    return false;
+  }
+
+  function pressNextUntilLeft(awemeId, attempt = 0) {
+    if (attempt > 0 && !isAwemeStillActive(awemeId)) {
+      logEvent("info", "自动跳过已生效", { awemeId, attempts: attempt });
+      return;
+    }
+    if (window.location.pathname !== "/") return;
+    if (attempt >= SKIP_MAX_ATTEMPTS) {
+      logEvent("warn", "自动跳过未生效，已放弃", { awemeId, attempts: attempt });
+      return;
+    }
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        code: "ArrowDown",
+        keyCode: 40,
+        which: 40,
+        bubbles: true,
+        cancelable: true
+      })
+    );
+    setTimeout(() => pressNextUntilLeft(awemeId, attempt + 1), SKIP_RETRY_INTERVAL_MS);
   }
 
   function renderToolbarPanel(state) {
@@ -1803,6 +1902,7 @@ function reconcileCardToolbar() {
   }
 
   activeContainer = findActiveContainer();
+  skipBlockedActiveVideo(activeContainer);
   const cards = findCards();
 
   if (!cards.length) {
@@ -1941,6 +2041,12 @@ function scheduleToolbarPosition() {
     if (event.origin !== window.location.origin) return;
 
     const data = event.data;
+    if (data?.source === TEST_MESSAGE_SOURCE && data.type === "skip-all") {
+      testSkipAll = data.enabled === true;
+      logEvent("warn", testSkipAll ? "测试模式：开始跳过所有视频" : "测试模式：已关闭", {});
+      updateToolbarPosition();
+      return;
+    }
     if (data?.source !== MESSAGE_SOURCE) return;
     if (data.type === "entry" && data.entry) handleEntry(data.entry);
     if (data.type === "entry-not-found" && data.awemeId) {

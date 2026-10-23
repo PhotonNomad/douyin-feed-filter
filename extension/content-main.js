@@ -555,7 +555,8 @@
   function isFeedUrl(url) {
     try {
       const parsed = new URL(url, window.location.origin);
-      return /\/aweme\/v1\/web\/(?:tab\/|familiar\/|recommend\/|channel\/)?feed\/?/i.test(
+      // 从关注/直播切回推荐时，首屏走的是 POST /aweme/v2/web/module/feed/。
+      return /\/aweme\/v\d+\/web\/(?:tab\/|familiar\/|recommend\/|channel\/|module\/)?feed\/?/i.test(
         parsed.pathname
       );
     } catch (_) {
@@ -1091,7 +1092,7 @@
     });
   }
 
-  async function getFilteredFeedResponse(response, requestUrl) {
+  async function getFilteredFeedResponse(response, requestUrl, canPrefetch = true) {
     let currentResponse = response;
     let currentUrl = requestUrl || response?.url || "";
     const seenCursors = new Set();
@@ -1110,7 +1111,7 @@
         return createFilteredResponse(currentResponse, filtered.text);
       }
 
-      if (!filtered.hasMore || !filtered.nextCursor) {
+      if (!canPrefetch || !filtered.hasMore || !filtered.nextCursor) {
         return createFilteredResponse(currentResponse, filtered.text);
       }
 
@@ -1153,7 +1154,13 @@
 
         if (response?.ok && isFeedUrl(url) && typeof response.clone === "function") {
           await waitForFilterSettings();
-          return await getFilteredFeedResponse(response, String(args[0] || ""));
+          // 预取下一页只会发 GET；POST 的推荐接口重发会丢请求体，只过滤当前页。
+          const method = String(args[1]?.method || args[0]?.method || "GET").toUpperCase();
+          return await getFilteredFeedResponse(
+            response,
+            String(args[0]?.url || args[0] || ""),
+            method === "GET"
+          );
         }
 
         const contentType = response?.headers?.get?.("content-type") || "";
