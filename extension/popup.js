@@ -1,9 +1,6 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
-  blocked: {},
-  buttonIcon: "not-interested",
-  customImage: "",
-  buttonSize: 40
+  blocked: {}
 };
 
 let settings = structuredClone(DEFAULT_SETTINGS);
@@ -18,13 +15,6 @@ const manualType = document.getElementById("manualType");
 const manualAdd = document.getElementById("manualAdd");
 const clearBlocked = document.getElementById("clearBlocked");
 const clearHistory = document.getElementById("clearHistory");
-const iconFile = document.getElementById("iconFile");
-const iconPreview = document.getElementById("iconPreview");
-const iconPreviewBox = document.getElementById("iconPreviewBox");
-const iconPreviewText = document.getElementById("iconPreviewText");
-const clearIcon = document.getElementById("clearIcon");
-const buttonSize = document.getElementById("buttonSize");
-const buttonSizeValue = document.getElementById("buttonSizeValue");
 
 function normalizedText(value) {
   return String(value || "")
@@ -121,51 +111,7 @@ function renderBlocked() {
 
 function render() {
   enabledInput.checked = Boolean(settings.enabled);
-  const hasCustomImage = Boolean(settings.customImage);
-  iconPreview.src = settings.customImage || "";
-  iconPreview.hidden = !hasCustomImage;
-  iconPreviewText.hidden = hasCustomImage;
-  iconPreviewText.textContent = hasCustomImage ? "" : "默认";
-  clearIcon.disabled = !settings.customImage;
-  buttonSize.value = String(settings.buttonSize || 40);
-  buttonSizeValue.textContent = `${buttonSize.value}px`;
   renderBlocked();
-}
-
-function readAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("读取图片失败"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function loadImage(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("图片加载失败"));
-    image.src = dataUrl;
-  });
-}
-
-async function resizeImageFile(file) {
-  const dataUrl = await readAsDataUrl(file);
-  const image = await loadImage(dataUrl);
-
-  const maxSize = 64;
-  const scale = maxSize / Math.max(image.width, image.height);
-  const width = Math.max(1, Math.round(image.width * scale));
-  const height = Math.max(1, Math.round(image.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-
-  const context = canvas.getContext("2d");
-  context.clearRect(0, 0, width, height);
-  context.drawImage(image, 0, 0, width, height);
-  return canvas.toDataURL("image/png");
 }
 
 function formatBlockedTime(value) {
@@ -246,49 +192,6 @@ enabledInput.addEventListener("change", () => {
   chrome.storage.local.set({ enabled: settings.enabled });
 });
 
-iconPreviewBox.addEventListener("click", () => iconFile.click());
-iconPreviewBox.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  event.preventDefault();
-  iconFile.click();
-});
-
-iconFile.addEventListener("change", async () => {
-  const file = iconFile.files?.[0];
-  if (!file) return;
-
-  try {
-    const dataUrl = await resizeImageFile(file);
-    settings.customImage = dataUrl;
-    settings.buttonIcon = "custom";
-    await chrome.storage.local.set({
-      customImage: dataUrl,
-      buttonIcon: "custom"
-    });
-    render();
-  } catch (_) {
-    // 这里不需要打断用户，预览和按钮会保持上一次状态。
-  } finally {
-    iconFile.value = "";
-  }
-});
-
-clearIcon.addEventListener("click", () => {
-  settings.customImage = "";
-  settings.buttonIcon = "not-interested";
-  chrome.storage.local.set({
-    customImage: "",
-    buttonIcon: "not-interested"
-  });
-  render();
-});
-
-buttonSize.addEventListener("input", () => {
-  settings.buttonSize = Number(buttonSize.value);
-  buttonSizeValue.textContent = `${buttonSize.value}px`;
-  chrome.storage.local.set({ buttonSize: settings.buttonSize });
-});
-
 manualAdd.addEventListener("click", () => {
   const value = manualInput.value.trim();
   if (!value) return;
@@ -334,3 +237,8 @@ function load() {
 }
 
 load();
+
+// 旧版本保存的按钮图标、图片和尺寸设置已不再使用，打开管理界面时顺手清掉。
+try {
+  chrome.storage.local.remove(["buttonIcon", "customImage", "buttonSize"], () => {});
+} catch (_) {}

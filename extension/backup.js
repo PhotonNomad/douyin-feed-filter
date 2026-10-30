@@ -1,8 +1,7 @@
 (() => {
   const FORMAT = "douyin-feed-filter-backup";
   const DEFAULTS = {
-    enabled: true, blocked: {}, buttonIcon: "not-interested",
-    customImage: "", buttonSize: 40, blockedHistory: []
+    enabled: true, blocked: {}, blockedHistory: []
   };
   const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   const fail = (message) => { throw new Error(message); };
@@ -29,15 +28,6 @@
     if (source.enabled !== undefined) {
       if (typeof source.enabled !== "boolean") fail("启用设置格式不正确");
       data.enabled = source.enabled;
-    }
-    if (source.buttonIcon !== undefined) data.buttonIcon = text(source.buttonIcon, "按钮图标", 64);
-    if (source.buttonSize !== undefined) {
-      if (!Number.isInteger(source.buttonSize) || source.buttonSize < 32 || source.buttonSize > 56) fail("按钮大小必须在 32–56 之间");
-      data.buttonSize = source.buttonSize;
-    }
-    if (source.customImage !== undefined) {
-      data.customImage = text(source.customImage, "自定义图片", 2 * 1024 * 1024);
-      if (data.customImage && !/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(data.customImage)) fail("自定义图片格式不正确");
     }
     if (source.blockedHistory !== undefined) {
       if (!Array.isArray(source.blockedHistory)) fail("屏蔽记录格式不正确");

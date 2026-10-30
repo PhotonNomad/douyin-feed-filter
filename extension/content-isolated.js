@@ -6,42 +6,19 @@
   const ISOLATED_MESSAGE_SOURCE = "douyin-bgm-filter/isolated";
   const DEFAULT_SETTINGS = {
     enabled: true,
-    blocked: {},
-    buttonIcon: "not-interested",
-    customImage: "",
-    buttonSize: 40
+    blocked: {}
   };
   // 只有这些键变化才需要重载设置：日志和屏蔽记录变化很频繁，没必要跟着重算。
-  const SETTINGS_KEYS = ["enabled", "blocked", "buttonIcon", "customImage", "buttonSize"];
+  const SETTINGS_KEYS = ["enabled", "blocked"];
   const MAX_KNOWN_ENTRIES = 300;
+  // 屏蔽按钮固定 40px：留出点击区域，又不挡住右侧操作栏。
+  const BUTTON_SIZE = 40;
 
-  const BUTTON_ICONS = {
-    "not-interested": `
+  const TOOLBAR_ICON_SVG = `
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <path fill-rule="evenodd" clip-rule="evenodd" d="M22 9.17756C22 9.15578 21.9993 9.13415 21.9979 9.11271C21.9993 9.05948 22 9.0061 22 8.95259C22 5.54223 19.2353 2.77759 15.825 2.77759C14.3806 2.77759 13.0513 3.27431 12 4.10469C10.9487 3.27431 9.61938 2.77759 8.175 2.77759C4.76464 2.77759 2 5.54223 2 8.95259C2 9.0062 2.00069 9.05968 2.00205 9.11301C2.00069 9.13435 2 9.15588 2 9.17756C2 10.4709 2.51833 11.7465 3.22256 12.8983C3.93327 14.0608 4.88418 15.1797 5.86669 16.1802C7.83219 18.1817 10.0219 19.8071 10.96 20.4729C11.5867 20.9176 12.4133 20.9176 13.04 20.4729C13.9781 19.8071 16.1678 18.1817 18.1333 16.1802C19.1158 15.1797 20.0667 14.0608 20.7774 12.8983C21.4817 11.7465 22 10.4709 22 9.17756ZM4 8.95259C4 6.6468 5.86921 4.77759 8.175 4.77759C9.00569 4.77759 9.7792 5.0196 10.4297 5.43793L10.0202 7.98603C10.0073 8.066 10.0273 8.14777 10.0757 8.21274L11.7057 10.403C11.752 10.4652 11.7724 10.543 11.7626 10.6199L11.4741 12.8919C11.4355 13.1962 11.8244 13.3555 12.0103 13.1115L13.895 10.6378C13.96 10.5525 13.9746 10.4391 13.9332 10.3402L13.0428 8.21329C13.0152 8.14735 13.0121 8.07371 13.034 8.00565L13.9249 5.23374C14.4949 4.94189 15.1405 4.77759 15.825 4.77759C18.1308 4.77759 20 6.6468 20 8.95259C20 9.01371 19.9987 9.07446 19.9961 9.13482C19.9943 9.17751 19.9952 9.22003 19.9987 9.26214C19.9765 10.0181 19.6587 10.894 19.0711 11.8551C18.4679 12.8416 17.6288 13.8395 16.7063 14.7789C14.9381 16.5795 12.9537 18.075 12 18.7581C11.0463 18.075 9.06189 16.5795 7.29368 14.7789C6.37124 13.8395 5.53206 12.8416 4.92891 11.8551C4.34127 10.8939 4.0234 10.0179 4.00124 9.2619C4.0048 9.21987 4.00571 9.17743 4.00389 9.13483C4.00131 9.07447 4 9.01371 4 8.95259Z" fill="#ffffff"/>
       </svg>
-    `,
-    heart: `
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 20.5s-6.4-4.1-8.7-7.7C1.3 9.8 2.5 6.2 5.6 6.2c1.9 0 3.2 1 4.4 2.5 1.2-1.5 2.5-2.5 4.4-2.5 3.1 0 4.3 3.6 2.3 6.6-2.3 3.6-8.7 7.7-8.7 7.7z" fill="currentColor"/>
-      </svg>
-    `,
-    star: `
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 3l2.7 5.7 6.3.8-4.6 4.3 1.2 6.2L12 17l-5.6 3 1.2-6.2L3 9.5l6.3-.8L12 3z" fill="currentColor"/>
-      </svg>
-    `,
-    comment: `
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 5h16a1 1 0 011 1v9a1 1 0 01-1 1h-7l-4 3v-3H4a1 1 0 01-1-1V6a1 1 0 011-1z" fill="currentColor"/>
-      </svg>
-    `,
-    share: `
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M14 4l6 5-6 5v-3H9a5 5 0 00-5 5v1H2v-1a7 7 0 017-7h5V4z" fill="currentColor"/>
-      </svg>
-    `
-  };
+    `;
 
   let settings = structuredClone(DEFAULT_SETTINGS);
   const knownEntries = new Map();
@@ -398,8 +375,8 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        width: var(--douyin-bgm-filter-button-size, 40px);
-        height: var(--douyin-bgm-filter-button-size, 40px);
+        width: 40px;
+        height: 40px;
         padding: 0;
         border: 0;
         border-radius: 12px;
@@ -415,13 +392,6 @@
         width: 22px;
         height: 22px;
         display: block;
-      }
-
-      .douyin-bgm-filter-button img {
-        width: 22px;
-        height: 22px;
-        display: block;
-        object-fit: contain;
       }
 
       .douyin-bgm-filter-button:hover {
@@ -591,45 +561,11 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  // 按钮尺寸只有一个来源：设置。渲染和定位都必须用它，
-  // 否则会出现「按 100px 算 X、按钮却渲染成 56px」的横向错位。
-  function resolvedButtonSize() {
-    return Math.min(56, Math.max(32, Number(settings.buttonSize) || 40));
-  }
-
   function renderCardToolbarIcon(state) {
     if (!state?.button) return;
 
-    const iconName =
-      settings.buttonIcon === "custom" && settings.customImage
-        ? "custom"
-        : BUTTON_ICONS[settings.buttonIcon]
-          ? settings.buttonIcon
-          : "not-interested";
-
     state.button.textContent = "";
-
-    if (iconName === "custom") {
-      const image = document.createElement("img");
-      image.src = settings.customImage;
-      image.alt = "";
-      image.draggable = false;
-      state.button.appendChild(image);
-      return;
-    }
-
-    state.button.insertAdjacentHTML(
-      "beforeend",
-      BUTTON_ICONS[iconName] || BUTTON_ICONS["not-interested"]
-    );
-  }
-
-  function applyCardToolbarMetrics(state) {
-    if (!state?.button) return;
-
-    const size = resolvedButtonSize();
-    state.button.style.width = `${size}px`;
-    state.button.style.height = `${size}px`;
+    state.button.insertAdjacentHTML("beforeend", TOOLBAR_ICON_SVG);
   }
 
   function applyCardToolbarLabels(state) {
@@ -680,7 +616,6 @@
     state.panel.className = "douyin-bgm-filter-panel";
 
     renderCardToolbarIcon(state);
-    applyCardToolbarMetrics(state);
     applyCardToolbarLabels(state);
 
     state.root.append(state.button, state.panel);
@@ -1139,13 +1074,6 @@
           storage.remove("recent", () => {});
         } catch (_) {}
 
-        // 按钮尺寸变了会让 X 偏移跟着变，所以套用尺寸后要作废缓存、重新量一次。
-        for (const state of cardToolbars) {
-          renderCardToolbarIcon(state);
-          applyCardToolbarMetrics(state);
-          state.measured = false;
-          state.metrics = null;
-        }
         postSettingsToMain();
         updateToolbarPosition();
       });
@@ -1838,7 +1766,7 @@ function repositionCardToolbar(state, retries = CARD_MEASURE_RETRIES) {
     : targetRect.right - RAIL_CENTER_INSET_FALLBACK;
 
   const scale = cardTransformScale(card);
-  const size = resolvedButtonSize();
+  const size = BUTTON_SIZE;
   const metrics = {
     top: Math.max(10, Math.round((targetRect.top - cardRect.top) / scale.y + 10)),
     left: Math.max(8, Math.round((anchorCenterX - cardRect.left) / scale.x - size / 2)),
