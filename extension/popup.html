@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" style="background:#f4f6f8">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light" />
     <title>抖音视频屏蔽</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
-  <body>
+  <body class="popup">
     <header>
       <h1>抖音视频屏蔽</h1>
       <label class="switch">
@@ -21,7 +22,7 @@
           <button id="clearBlocked" class="ghost small">清空</button>
         </div>
         <div id="blockedList" class="list"></div>
-        <p id="blockedEmpty" class="empty">暂无屏蔽项。</p>
+        <p id="blockedEmpty" class="empty" hidden>暂无屏蔽项。</p>
       </section>
 
       <section>
@@ -48,7 +49,7 @@
           <button id="clearHistory" class="ghost small">清空</button>
         </div>
         <div id="historyList" class="list"></div>
-        <p id="historyEmpty" class="empty">暂无屏蔽记录。</p>
+        <p id="historyEmpty" class="empty" hidden>暂无屏蔽记录。</p>
       </section>
 
       <nav class="page-links" aria-label="管理工具">

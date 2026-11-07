@@ -70,9 +70,9 @@ function renderBlocked() {
     (a, b) => (b.addedAt || 0) - (a.addedAt || 0)
   );
 
-  blockedList.textContent = "";
   blockedEmpty.hidden = blocked.length > 0;
 
+  const fragment = document.createDocumentFragment();
   for (const rule of blocked) {
     const item = document.createElement("div");
     item.className = "item";
@@ -95,8 +95,10 @@ function renderBlocked() {
 
     text.append(title, sub);
     item.append(text, action);
-    blockedList.appendChild(item);
+    fragment.appendChild(item);
   }
+
+  blockedList.replaceChildren(fragment);
 }
 
 function render() {
@@ -119,9 +121,9 @@ function openBlockedVideo(record) {
 
 function renderHistory(history) {
   const records = Array.isArray(history) ? history : [];
-  historyList.textContent = "";
   historyEmpty.hidden = records.length > 0;
 
+  const fragment = document.createDocumentFragment();
   for (const record of records) {
     const item = document.createElement("div");
     item.className = "item";
@@ -155,8 +157,10 @@ function renderHistory(history) {
 
     text.append(title, sub);
     item.append(text);
-    historyList.appendChild(item);
+    fragment.appendChild(item);
   }
+
+  historyList.replaceChildren(fragment);
 }
 
 function blockRule(rule) {
@@ -222,10 +226,12 @@ clearHistory.addEventListener("click", () => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  load();
+  // 诊断日志等频繁写入不需要重绘弹窗；只响应这里真正展示的键。
+  if (changes.enabled || changes.blocked) loadSettings();
+  if (changes.blockedHistory) loadHistory();
 });
 
-function load() {
+function loadSettings() {
   chrome.storage.local.get(DEFAULT_SETTINGS, (items) => {
     settings = {
       ...structuredClone(DEFAULT_SETTINGS),
@@ -239,14 +245,24 @@ function load() {
     chrome.storage.local.remove("recent");
     render();
   });
+}
 
+function loadHistory() {
   chrome.storage.local.get({ blockedHistory: [] }, (items) => {
     renderHistory(items.blockedHistory);
   });
 }
 
+function load() {
+  loadSettings();
+  loadHistory();
+}
+
 updateManualInput();
-load();
+
+// 先让背景和静态框架完成首帧绘制，再读取存储、创建列表节点。
+// 记录多的时候，渲染不会挡住弹出窗口的第一帧。
+requestAnimationFrame(() => requestAnimationFrame(load));
 
 // 旧版本保存的按钮图标、图片和尺寸设置已不再使用，打开管理界面时顺手清掉。
 try {
