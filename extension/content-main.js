@@ -12,6 +12,8 @@
     enabled: true,
     blocked: {}
   };
+  // 博主/标签的组合规则在设置到达时编译一次，推荐数据里逐条匹配时不再重复解析。
+  let compiledRules = globalThis.DouyinFeedFilterRules?.compileRules(filterSettings.blocked) || null;
 
   // 诊断日志：数据层在 MAIN world，只能把记录转发给隔离世界，由它统一保存和导出。
   function logEvent(level, message, data) {
@@ -542,12 +544,8 @@
       if (rule && rules[rule.key]) return rules[rule.key];
     }
 
-    const tags = (entry.tags || []).map(normalizedText);
-    for (const rule of Object.values(rules)) {
-      if (rule?.kind !== "tagKeyword") continue;
-      const keyword = normalizedText(rule.value).replace(/^#+/, "").trim();
-      if (keyword && tags.some((tag) => tag.includes(keyword))) return rule;
-    }
+    const expressionRule = globalThis.DouyinFeedFilterRules?.matchCompiled(compiledRules, entry);
+    if (expressionRule) return expressionRule;
 
     return null;
   }
@@ -1008,6 +1006,7 @@
       blocked:
         data.blocked && typeof data.blocked === "object" ? data.blocked : {}
     };
+    compiledRules = globalThis.DouyinFeedFilterRules?.compileRules(filterSettings.blocked) || null;
     settingsReadyResolve?.();
   });
 

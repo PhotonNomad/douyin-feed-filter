@@ -21,6 +21,8 @@
     `;
 
   let settings = structuredClone(DEFAULT_SETTINGS);
+  // 博主/标签的组合规则只在设置变化时编译一次。
+  let compiledRules = globalThis.DouyinFeedFilterRules?.compileRules(settings.blocked) || null;
   const knownEntries = new Map();
   const knownLiveEntries = new Map();
   const LIVE_CONTAINER_SELECTOR = '[data-e2e="feed-live"], [data-e2e="live-container"], [data-e2e="live-feed-item"], [data-e2e="webcast-feed-item"]';
@@ -230,6 +232,10 @@
       .replace(/\s+/g, " ");
   }
 
+  function refreshCompiledRules() {
+    compiledRules = globalThis.DouyinFeedFilterRules?.compileRules(settings.blocked) || null;
+  }
+
   function postSettingsToMain() {
     try {
       window.postMessage(
@@ -325,12 +331,8 @@
       }
     }
 
-    const tags = (entry.tags || []).map(normalizedText);
-    for (const rule of Object.values(settings.blocked)) {
-      if (rule?.kind !== "tagKeyword") continue;
-      const keyword = normalizedText(rule.value).replace(/^#+/, "").trim();
-      if (keyword && tags.some((tag) => tag.includes(keyword))) return rule;
-    }
+    const expressionRule = globalThis.DouyinFeedFilterRules?.matchCompiled(compiledRules, entry);
+    if (expressionRule) return expressionRule;
 
     return null;
   }
@@ -755,11 +757,13 @@
         addedAt: now
       };
     }
+    refreshCompiledRules();
 
     try {
       const storage = chrome?.storage?.local;
       if (!storage) {
         settings.blocked = previousBlocked;
+        refreshCompiledRules();
         return;
       }
 
@@ -768,6 +772,7 @@
         const error = chrome?.runtime?.lastError;
         if (error) {
           settings.blocked = previousBlocked;
+          refreshCompiledRules();
           logEvent("error", "保存屏蔽规则失败", { message: error.message });
           showLiveNotice("保存规则失败，请重载扩展后重试。");
           return;
@@ -785,6 +790,7 @@
       });
     } catch (error) {
       settings.blocked = previousBlocked;
+      refreshCompiledRules();
       logEvent("error", "保存屏蔽规则时抛错", { message: String(error?.message || error) });
     }
 
@@ -1069,6 +1075,8 @@
         if (!settings.blocked || typeof settings.blocked !== "object") {
           settings.blocked = {};
         }
+
+        refreshCompiledRules();
 
         try {
           storage.remove("recent", () => {});

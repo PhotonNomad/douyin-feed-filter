@@ -16,6 +16,14 @@ const manualAdd = document.getElementById("manualAdd");
 const clearBlocked = document.getElementById("clearBlocked");
 const clearHistory = document.getElementById("clearHistory");
 
+const MANUAL_PLACEHOLDERS = {
+  music: "输入音乐 ID 或名称",
+  author: "如：官方|旗舰 -招聘",
+  tag: '如：穿搭 -广告 | "每日穿搭"'
+};
+const MANUAL_RULE_HINT =
+  '空格表示同时包含，| 表示任一匹配，- 前缀表示整条规则排除，引号表示完全相同。例：穿搭 -广告 | "每日穿搭"';
+
 function normalizedText(value) {
   return String(value || "")
     .trim()
@@ -25,8 +33,9 @@ function normalizedText(value) {
 
 function kindLabel(kind) {
   if (kind === "author") return "博主";
+  if (kind === "authorKeyword") return "博主匹配";
   if (kind === "tag") return "标签";
-  if (kind === "tagKeyword") return "标签包含关键词";
+  if (kind === "tagKeyword") return "标签匹配";
   return "音乐";
 }
 
@@ -52,27 +61,8 @@ function buildRule(kind, value) {
     };
   }
 
-  if (kind === "author") {
-    return {
-      key: `author:${normalizedText(cleanValue)}`,
-      kind: "author",
-      value: cleanValue,
-      label: `博主 ${cleanValue}`
-    };
-  }
-
-  if (kind === "tag" || kind === "tagKeyword") {
-    const tag = cleanValue.replace(/^#+/, "").trim();
-    if (!tag) return null;
-    return {
-      key: `${kind}:${normalizedText(tag)}`,
-      kind,
-      value: tag,
-      label: kind === "tagKeyword" ? `标签包含 ${tag}` : `标签 #${tag}`
-    };
-  }
-
-  return null;
+  // 博主和标签共用组合写法：空格=同时，| =任一，- =整条规则排除，引号=完全相等。
+  return globalThis.DouyinFeedFilterRules?.buildExpressionRule(kind, cleanValue) || null;
 }
 
 function renderBlocked() {
@@ -192,12 +182,31 @@ enabledInput.addEventListener("change", () => {
   chrome.storage.local.set({ enabled: settings.enabled });
 });
 
+function updateManualInput() {
+  const kind = manualType.value || "music";
+  manualInput.placeholder = MANUAL_PLACEHOLDERS[kind] || MANUAL_PLACEHOLDERS.music;
+  manualInput.title = kind === "music" ? "" : MANUAL_RULE_HINT;
+  manualInput.setCustomValidity("");
+}
+
+manualType.addEventListener("change", updateManualInput);
+manualInput.addEventListener("input", () => manualInput.setCustomValidity(""));
+
 manualAdd.addEventListener("click", () => {
   const value = manualInput.value.trim();
   if (!value) return;
 
-  const rule = buildRule(manualType.value || "music", value);
-  if (!rule) return;
+  const kind = manualType.value || "music";
+  const rule = buildRule(kind, value);
+  if (!rule) {
+    if (kind !== "music") {
+      manualInput.setCustomValidity("规则写法不对。空格=同时包含，|=任一，-=整条规则排除，引号=完全相同。");
+      manualInput.reportValidity();
+    }
+    return;
+  }
+
+  manualInput.setCustomValidity("");
   blockRule(rule);
   manualInput.value = "";
 });
@@ -236,6 +245,7 @@ function load() {
   });
 }
 
+updateManualInput();
 load();
 
 // 旧版本保存的按钮图标、图片和尺寸设置已不再使用，打开管理界面时顺手清掉。

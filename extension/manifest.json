@@ -23,6 +23,7 @@
       ],
       "js": [
         "native-feedback-main.js",
+        "rules.js",
         "content-main.js"
       ],
       "run_at": "document_start",
@@ -35,6 +36,7 @@
       "js": [
         "native-feedback-client.js",
         "live-actions.js",
+        "rules.js",
         "content-isolated.js"
       ],
       "run_at": "document_start"

@@ -17,7 +17,7 @@
     if (!isObject(source) || !isObject(source.blocked)) fail("备份缺少有效的屏蔽规则");
     const data = structuredClone(DEFAULTS);
     for (const [key, rule] of Object.entries(source.blocked)) {
-      if (!isObject(rule) || !["music", "author", "tag", "tagKeyword"].includes(rule.kind)) fail("存在不支持的屏蔽规则");
+      if (!isObject(rule) || !["music", "author", "tag", "tagKeyword", "authorKeyword"].includes(rule.kind)) fail("存在不支持的屏蔽规则");
       const prefixes = rule.kind === "music" ? ["music:", "title:"] : [`${rule.kind}:`];
       if (!prefixes.some((prefix) => key.startsWith(prefix) && key.slice(prefix.length).trim())) fail("屏蔽规则键不正确");
       if (rule.key !== key || !text(rule.value, "规则内容").trim()) fail("屏蔽规则内容不正确");
